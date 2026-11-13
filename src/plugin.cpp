@@ -232,7 +232,16 @@ extern "C" SCSAPI_RESULT scs_telemetry_init(const scs_u32_t version,
         ep::LoadSettings(dir);
         ep::Features features = ep::SafeModeBegin(dir);
         ep::RadioTrackerInit();
-        bool net = ep::NetHooksInstall();
+        // Network hooks detect the in-game radio stream (station, song). ON by default. If joining a Convoy session
+        // fails with "DLCs do not match", set [radio] stream_titles=0 in CoachNowPlaying.ini (no radio info then).
+        const std::wstring iniPath = dir + L"\\CoachNowPlaying.ini";
+        int streamTitles = static_cast<int>(GetPrivateProfileIntW(L"radio", L"stream_titles", -1, iniPath.c_str()));
+        if (streamTitles < 0) {
+            WritePrivateProfileStringW(L"radio", L"stream_titles", L"1", iniPath.c_str());
+            streamTitles = 1;
+        }
+        bool net = streamTitles != 0 && ep::NetHooksInstall();
+        ep::Logf("NET radio stream titles %s (CoachNowPlaying.ini [radio] stream_titles=%d)", net ? "on" : "off", streamTitles);
         // CoachNowPlaying: no game-code hooks at all. The "CarPlay-Style Infotainment for Coaches" mod ships its own
         // placeholder texture (material/ui/cpc_np/np.dds) on its MUSIK page; the D3D11 hook recognises that texture
         // and swaps it for our picture. The game's own GPS UI keeps running, so the version watchdog is not needed.
@@ -242,7 +251,6 @@ extern "C" SCSAPI_RESULT scs_telemetry_init(const scs_u32_t version,
         features.touch = false;  // the picture is drawn inside the game's UI pass, not on the cabin mesh: no mouse mapping
         ep::FitInit(0);
         bool gfx = ep::D3D11HooksInstall(features.screen, features.upload, false);
-        ep::MediaStart();
         ep::CoverLookupStart();
         ep::ExtraSourcesStart();
         ep::StationLogoStart();
@@ -277,7 +285,6 @@ extern "C" SCSAPI_VOID scs_telemetry_shutdown(void) {
     ep::ExtraSourcesStop();
     ep::StationLogoStop();
     ep::CoverLookupStop();
-    ep::MediaStop();
     ep::RadioTrackerShutdown();
     ep::SafeModeEndClean();
     // Hooks stay installed (they pass through) because the module is pinned and the game is exiting.

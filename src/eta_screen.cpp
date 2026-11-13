@@ -2,7 +2,6 @@
 
 #include "cover_lookup.h"
 #include "log.h"
-#include "media.h"
 #include "radio_tracker.h"
 #include "settings.h"
 #include "station_logo.h"
@@ -181,15 +180,29 @@ std::vector<uint8_t> Draw(const Field& f, const std::wstring& main, const std::w
 // NOW PLAYING bar (KARTE page): picture | title / artist + source. Radio wins while a station plays.
 // ---------------------------------------------------------------------------------------------
 struct NowInfo {
-    std::wstring title, sub;  // sub = "Artist · SPOTIFY" / "Artist · Station"
+    std::wstring title, sub;  // sub = "Artist · Station"
     std::shared_ptr<const std::vector<uint8_t>> picture;
     std::wstring key;
+    bool visible = false;  // false = radio off: the whole bar is transparent
 };
 
 NowInfo GetNow() {
     NowInfo n;
+    // Radio only (no Spotify / media players). While switching stations the stream is closed for a moment:
+    // keep the last radio info for a short while so the bar does not flicker.
+    static RadioSnapshot s_last;
+    static ULONGLONG s_lastTick = 0;
     RadioSnapshot r = RadioGetSnapshot();
+    const ULONGLONG tick = GetTickCount64();
     if (r.active) {
+        s_last = r;
+        s_lastTick = tick;
+    } else if (s_lastTick != 0 && (r.connecting || tick - s_lastTick < static_cast<ULONGLONG>(GetSettings().radioHoldMs))) {
+        r = s_last;
+        r.active = true;
+    }
+    if (r.active) {
+        n.visible = true;
         const std::string station = r.stationName.empty() ? r.icyName : r.stationName;
         const std::wstring stationW = ToWide(station);
         const std::string raw = r.title;
@@ -206,20 +219,10 @@ NowInfo GetNow() {
             LogoResult l = StationLogoGet(station, r.stationUrl);
             if (l.state == LogoState::Found) n.picture = l.image;
         }
-    } else {
-        MediaSnapshot m = MediaGetSnapshot();
-        if (m.hasSession && (!m.title.empty() || !m.artist.empty())) {
-            n.title = ToWide(m.title);
-            n.sub = ToWide(m.artist) + (m.playing ? L"  ·  SPOTIFY" : L"  ·  PAUSE");
-            n.picture = m.cover;
-        } else {
-            n.title = L"Gerade läuft nichts";
-            n.sub = L"Radio einschalten oder Spotify starten";
-        }
     }
     wchar_t ptr[32];
     swprintf(ptr, 32, L"|%p", static_cast<const void*>(n.picture.get()));
-    n.key = n.title + L"|" + n.sub + ptr;
+    n.key = (n.visible ? L"1|" : L"0|") + n.title + L"|" + n.sub + ptr;
     return n;
 }
 
@@ -272,6 +275,7 @@ void BlitPicture(const std::shared_ptr<const std::vector<uint8_t>>& bytes, uint8
 
 std::vector<uint8_t> DrawNowBar(const Field& f, const NowInfo& n) {
     std::vector<uint8_t> out(static_cast<size_t>(f.w) * f.h * 4, 0);
+    if (!n.visible) return out;  // radio off: fully transparent, nothing shows on the map
     HDC dc = CreateCompatibleDC(nullptr);
     if (!dc) return out;
     BITMAPINFO bi{};
@@ -318,7 +322,20 @@ std::vector<uint8_t> DrawNowBar(const Field& f, const NowInfo& n) {
     DeleteObject(smallFont);
     GdiFlush();
     memcpy(out.data(), bits, out.size());
-    for (size_t i = 3; i < out.size(); i += 4) out[i] = 0xFF;
+    // rounded card: alpha follows the corner shape (the UI has no own card behind the bar any more)
+    const float rad = 17.0f;
+    for (UINT yy = 0; yy < f.h; ++yy) {
+        for (UINT xx = 0; xx < f.w; ++xx) {
+            float cx = xx + 0.5f, cy = yy + 0.5f, cov = 1.0f;
+            float dx = cx < rad ? rad - cx : (cx > f.w - rad ? cx - (f.w - rad) : 0.0f);
+            float dy = cy < rad ? rad - cy : (cy > f.h - rad ? cy - (f.h - rad) : 0.0f);
+            if (dx > 0 && dy > 0) {
+                float d = std::sqrt(dx * dx + dy * dy);
+                cov = d >= rad ? 0.0f : (d > rad - 1.0f ? rad - d : 1.0f);
+            }
+            out[(static_cast<size_t>(yy) * f.w + xx) * 4 + 3] = static_cast<uint8_t>(cov * 255.0f + 0.5f);
+        }
+    }
     SelectObject(dc, oldBmp);
     DeleteObject(bmp);
     DeleteDC(dc);

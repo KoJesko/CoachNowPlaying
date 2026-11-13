@@ -663,7 +663,6 @@ void Renderer::CopyOut() {
 void Renderer::Frame(double t) {
     now_ = t;
     RadioSnapshot radio = RadioGetSnapshot();
-    MediaSnapshot media = MediaGetSnapshot();
 
     // While switching stations the stream is closed for a moment: keep showing the last radio screen.
     auto now = std::chrono::steady_clock::now();
@@ -693,10 +692,7 @@ void Renderer::Frame(double t) {
     bool buttons = false;
     if (radio.active) DrawRadio(radio, t);
     else if (holdRadio) DrawRadio(lastRadio_, t);
-    else if (media.hasSession && !media.title.empty()) {
-        DrawMedia(media, t);
-        buttons = true;
-    } else DrawIdle(t);
+    else DrawIdle(t);  // radio only, no Spotify/media players
     TouchSetButtonsVisible(buttons);
     DrawTouchCursor();
     HRESULT hr = rt_->EndDraw();
