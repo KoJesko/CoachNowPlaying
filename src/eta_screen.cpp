@@ -10,6 +10,7 @@
 #include <wincodec.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <memory>
@@ -54,7 +55,7 @@ struct Field {
 // Colours match the mod: card 0xFF1A1E26, text 0xFFE4E7EC, sign digits 0xFF101215.
 Field g_fields[3] = {
     {"ETA", 52, 1996, 256, 96, true, RGB(0x1A, 0x1E, 0x26), RGB(0xE4, 0xE7, 0xEC), 84, false, L"Segoe UI Semibold", FW_SEMIBOLD, 0},
-    {"LIMIT", 44, 1996, 128, 96, false, RGB(0, 0, 0), RGB(0x10, 0x12, 0x15), 80, true, L"Arial", FW_BOLD, 1},
+    {"LIMIT", 44, 1996, 128, 128, false, RGB(0, 0, 0), RGB(0x10, 0x12, 0x15), 54, true, L"Arial", FW_BOLD, 1},
     {"NOWBAR", 36, 1996, 768, 96, true, RGB(0x1A, 0x1E, 0x26), RGB(0xE4, 0xE7, 0xEC), 36, false, L"Segoe UI Semibold", FW_SEMIBOLD, 2},
 };
 
@@ -84,7 +85,7 @@ void EtaText(std::wstring& main, std::wstring& suffix) {
 
 void LimitText(std::wstring& main) {
     const float v = g_speedLimit.load();
-    if (v < 0.5f) return;  // no limit known: transparent, the sign stays empty
+    if (v < 0.5f) return;  // no limit known: the whole sign is hidden
     wchar_t buf[16];
     swprintf(buf, 16, L"%d", static_cast<int>(std::lround(v * 3.6f)));
     main = buf;
@@ -96,13 +97,14 @@ HFONT MakeFont(const Field& f, int px) {
 }
 
 // Draws white-on-black with GDI (grey anti-aliasing = coverage), then turns the coverage into the field's colours.
-std::vector<uint8_t> Draw(const Field& f, const std::wstring& main, const std::wstring& suffix) {
-    std::vector<uint8_t> out(static_cast<size_t>(f.w) * f.h * 4, 0);
+std::vector<uint8_t> Draw(const Field& f, const std::wstring& main, const std::wstring& suffix, UINT width = 0) {
+    const UINT W = width ? width : f.w;  // narrower drawing area (e.g. digits inside the speed sign)
+    std::vector<uint8_t> out(static_cast<size_t>(W) * f.h * 4, 0);
     HDC dc = CreateCompatibleDC(nullptr);
     if (!dc) return out;
     BITMAPINFO bi{};
     bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-    bi.bmiHeader.biWidth = static_cast<LONG>(f.w);
+    bi.bmiHeader.biWidth = static_cast<LONG>(W);
     bi.bmiHeader.biHeight = -static_cast<LONG>(f.h);  // top-down
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
@@ -136,10 +138,10 @@ std::vector<uint8_t> Draw(const Field& f, const std::wstring& main, const std::w
                 GetTextExtentPoint32W(dc, suffix.c_str(), static_cast<int>(suffix.size()), &ss);
                 ss.cx += px / 10;  // gap
             }
-            if (ms.cx + ss.cx <= static_cast<LONG>(f.w) - 4 || px <= 20) break;
+            if (ms.cx + ss.cx <= static_cast<LONG>(W) - 4 || px <= 20) break;
         }
         const int total = ms.cx + ss.cx;
-        const int x = f.center ? (static_cast<int>(f.w) - total) / 2 : 0;
+        const int x = f.center ? (static_cast<int>(W) - total) / 2 : 0;
         const int y = (static_cast<int>(f.h) - ms.cy) / 2;
         SelectObject(dc, mf);
         TextOutW(dc, x, y, main.c_str(), static_cast<int>(main.size()));
@@ -342,6 +344,33 @@ std::vector<uint8_t> DrawNowBar(const Field& f, const NowInfo& n) {
     return out;
 }
 
+// Speed limit sign: white disc, red ring, dark digits. No limit known = fully transparent (no empty sign on the map).
+std::vector<uint8_t> DrawSign(const Field& f, const std::wstring& digits) {
+    if (digits.empty()) return std::vector<uint8_t>(static_cast<size_t>(f.w) * f.h * 4, 0);
+    const UINT innerW = f.w * 72 / 100;  // digits must fit inside the ring
+    std::vector<uint8_t> txt = Draw(f, digits, L"", innerW);
+    std::vector<uint8_t> out(static_cast<size_t>(f.w) * f.h * 4, 0);
+    const float cx = f.w * 0.5f, cy = f.h * 0.5f, R = std::min(f.w, f.h) * 0.5f - 1.0f, ring = R * 0.80f;
+    const int ox = (static_cast<int>(f.w) - static_cast<int>(innerW)) / 2;
+    for (UINT y = 0; y < f.h; ++y) {
+        for (UINT x = 0; x < f.w; ++x) {
+            const float d = std::sqrt((x + 0.5f - cx) * (x + 0.5f - cx) + (y + 0.5f - cy) * (y + 0.5f - cy));
+            const float cover = std::clamp(R - d + 0.5f, 0.0f, 1.0f);       // outer edge
+            const float white = std::clamp(ring - d + 0.5f, 0.0f, 1.0f);    // inside the ring
+            float r = 0xC2 + (0xDC - 0xC2) * white, g = 0x41 + (0xDE - 0x41) * white, b = 0x3A + (0xE2 - 0x3A) * white;
+            const int tx = static_cast<int>(x) - ox;
+            if (tx >= 0 && tx < static_cast<int>(innerW)) {
+                const float a = txt[(static_cast<size_t>(y) * innerW + tx) * 4 + 3] / 255.0f * white;
+                r += (0x10 - r) * a; g += (0x12 - g) * a; b += (0x15 - b) * a;
+            }
+            uint8_t* o = &out[(static_cast<size_t>(y) * f.w + x) * 4];
+            o[0] = static_cast<uint8_t>(b); o[1] = static_cast<uint8_t>(g); o[2] = static_cast<uint8_t>(r);
+            o[3] = static_cast<uint8_t>(cover * 255.0f + 0.5f);
+        }
+    }
+    return out;
+}
+
 Field* FieldForDesc(const D3D11_TEXTURE2D_DESC* d) {
     for (auto& f : g_fields) {
         if (d->Width == f.phW && d->Height == f.phH) return &f;
@@ -488,7 +517,7 @@ void EtaUpload() {
             key = main + L"|" + suffix;
         }
         if (key != f.shown || tex != f.shownIn) {
-            std::vector<uint8_t> px = f.kind == 2 ? DrawNowBar(f, now) : Draw(f, main, suffix);
+            std::vector<uint8_t> px = f.kind == 2 ? DrawNowBar(f, now) : f.kind == 1 ? DrawSign(f, main) : Draw(f, main, suffix);
             ID3D11Device* dev = nullptr;
             tex->GetDevice(&dev);
             if (dev) {
