@@ -15,6 +15,8 @@ Optional ETS2 plugin for the Steam Workshop mod **"CarPlay-Style Infotainment fo
   announce the destination ("Sehr geehrte Fahrgäste, wir erreichen in wenigen Minuten …"), sounding like the driver at
   the microphone. Uses [Piper](https://github.com/rhasspy/piper) with the voice "Thorsten" (offline, included in the
   release ZIP); without it the Windows voice is used.
+- **Start-up animation** on the CarPlay screen (mod 0.7.0 or newer): when the bus is switched on, and when the screen
+  comes back from the black OFF page, four dots circle and merge into the ROADWORKS logo before the page shows.
 
 The mod works without the plugin; these extras need it.
 
@@ -73,7 +75,9 @@ Ansagen) → beim nächsten Start die Plugin-Meldung bestätigen.
 **Bringt:** Musik-Seite und „Läuft gerade“-Leiste fürs Ingame-Radio (nur sichtbar, wenn das Radio läuft), echte Ankunftsuhrzeit statt Restzeit,
 Tempolimit-Zahl im Schild, Live-Fahrgastanzeige auf dem Fernseher im MAN Lion's Coach (Ziel, Ankunft, Fortschritt,
 „Nächster Halt“) und eine Ansage etwa 5 Minuten vor dem Ziel mit Gong und natürlicher Stimme („Thorsten“, Piper, offline).
-Einstellungen unter `[announce]` in der INI (an/aus, Minuten, Lautstärke).
+Einstellungen unter `[announce]` in der INI (an/aus, Minuten, Lautstärke). Dazu eine Startanimation auf dem
+CarPlay-Bildschirm (ab Mod 0.7.0), wenn der Bus eingeschaltet wird und wenn das Display von der schwarzen Seite wieder
+angeht.
 
 **Steuerung:** Seiten mit „Infotainment Display Mode“, Radio mit den Radio-Tasten des Spiels.
 

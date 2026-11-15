@@ -1,5 +1,7 @@
 #include "eta_screen.h"
 
+#include "boot_anim.h"
+
 #include "cover_lookup.h"
 #include "log.h"
 #include "passenger.h"
@@ -41,7 +43,7 @@ struct Field {
     bool center;
     const wchar_t* face;
     int weight;
-    int kind;          // 0 = ETA, 1 = LIMIT, 2 = NOW PLAYING bar, 3 = passenger TV
+    int kind;          // 0 = ETA, 1 = LIMIT, 2 = NOW PLAYING bar, 3 = passenger TV, 4 = boot animation, 5 = off marker
 
     ID3D11Texture2D* placeholder = nullptr;
     ID3D11Texture2D* tex = nullptr;
@@ -51,15 +53,26 @@ struct Field {
     std::atomic<ID3D11ShaderResourceView*> views[kMaxViews];
     std::wstring shown;
     ID3D11Texture2D* shownIn = nullptr;
+    std::atomic<ULONGLONG> lastBound{0};  // last time the game drew this placeholder (= its page is on screen)
 };
 
 // Colours match the mod: card 0xFF1A1E26, text 0xFFE4E7EC, sign digits 0xFF101215.
-Field g_fields[4] = {
+Field g_fields[6] = {
     {"ETA", 52, 1996, 256, 96, true, RGB(0x1A, 0x1E, 0x26), RGB(0xE4, 0xE7, 0xEC), 84, false, L"Segoe UI Semibold", FW_SEMIBOLD, 0},
     {"LIMIT", 44, 1996, 128, 128, false, RGB(0, 0, 0), RGB(0x10, 0x12, 0x15), 54, true, L"Arial", FW_BOLD, 1},
     {"NOWBAR", 36, 1996, 768, 96, true, RGB(0x1A, 0x1E, 0x26), RGB(0xE4, 0xE7, 0xEC), 36, false, L"Segoe UI Semibold", FW_SEMIBOLD, 2},
     {"PAXTV", 1024, 760, 1024, 760, true, RGB(0x0E, 0x11, 0x17), RGB(0xFF, 0xFF, 0xFF), 0, false, L"Segoe UI", FW_NORMAL, 3},
+    {"BOOT", 28, 1996, 640, 360, false, RGB(0, 0, 0), RGB(0, 0, 0), 0, false, L"Segoe UI", FW_NORMAL, 4},
+    {"OFF", 20, 1996, 4, 4, true, RGB(0, 0, 0), RGB(0, 0, 0), 0, false, L"Segoe UI", FW_NORMAL, 5},
 };
+constexpr int kBootField = 4, kOffField = 5;
+
+// Start-up animation: armed while the black off page shows, started when the map page (with the boot placeholder)
+// is drawn after it.
+bool g_bootArmed = false;
+ULONGLONG g_bootStart = 0;
+std::atomic<int> g_electric{-1};             // -1 unknown, 0 off, 1 on
+std::atomic<bool> g_electricOnEvent{false};  // set by the telemetry thread, handled on the Present thread
 
 std::mutex g_mx;  // guards placeholder/tex/srv of all fields
 ULONGLONG g_lastLog = 0;
@@ -387,6 +400,10 @@ void EtaSetGameTime(uint32_t minutes) {
     g_haveGameTime = true;
 }
 void EtaSetNavigationTime(float seconds) { g_navSeconds = seconds; }
+void EtaSetElectric(bool on) {
+    const int prev = g_electric.exchange(on ? 1 : 0);
+    if (on && prev != 1) g_electricOnEvent = true;  // also the first value after loading: the bus comes alive
+}
 void EtaSetNavigationDistance(float meters) { g_navMeters = meters; }
 void EtaSetSpeedLimit(float metersPerSecond) { g_speedLimit = metersPerSecond; }
 
@@ -492,7 +509,10 @@ ID3D11ShaderResourceView* EtaSwapFor(ID3D11ShaderResourceView* s) {
         ID3D11ShaderResourceView* ours = f.srvAtomic.load(std::memory_order_relaxed);
         if (!ours) continue;
         for (auto& v : f.views) {
-            if (v.load(std::memory_order_relaxed) == s) return ours;
+            if (v.load(std::memory_order_relaxed) == s) {
+                f.lastBound.store(GetTickCount64(), std::memory_order_relaxed);
+                return ours;
+            }
         }
     }
     return nullptr;
@@ -501,6 +521,25 @@ ID3D11ShaderResourceView* EtaSwapFor(ID3D11ShaderResourceView* s) {
 void EtaUpload() {
     const ULONGLONG now = GetTickCount64();
     PaxTick(g_gameMinutes.load(), g_navSeconds.load(), g_navMeters.load());
+    {
+        const ULONGLONG offSeen = g_fields[kOffField].lastBound.load(std::memory_order_relaxed);
+        const ULONGLONG bootSeen = g_fields[kBootField].lastBound.load(std::memory_order_relaxed);
+        // bus switched off: overlay black (ready), bus switched on: animation, whatever page is showing
+        if (g_electric.load() == 0) g_bootArmed = true;
+        if (g_electricOnEvent.exchange(false)) {
+            g_bootArmed = false;
+            g_bootStart = now;
+            Logf("BOOT bus switched on: start-up animation");
+        }
+        if (offSeen != 0 && now - offSeen < 400) g_bootArmed = true;
+        if (g_bootArmed && g_electric.load() != 0 && bootSeen > offSeen && now - bootSeen < 400) {
+            g_bootArmed = false;
+            g_bootStart = now;
+            Logf("BOOT screen switched on again: start-up animation");
+        }
+    }
+    const float bootT = g_bootStart != 0 ? (now - g_bootStart) / 1000.0f : -1.0f;
+    const bool bootRunning = bootT >= 0.0f && bootT < kBootSeconds;
     for (auto& f : g_fields) {
         ID3D11Texture2D* tex = nullptr;
         {
@@ -520,11 +559,19 @@ void EtaUpload() {
         } else if (f.kind == 3) {
             pax = PaxGetView(g_gameMinutes.load(), g_haveGameTime.load(), g_navSeconds.load(), g_navMeters.load());
             key = pax.key;
+        } else if (f.kind == 4) {
+            // while the screen is off the overlay is already opaque black, so the first map frame after switching on
+            // shows black (not a flash of the map) and the animation starts from there
+            key = bootRunning ? L"run|" + std::to_wstring(static_cast<int>(bootT * 30.0f)) : g_bootArmed ? L"armed" : L"idle";
+        } else if (f.kind == 5) {
+            key = L"off";
         } else {
             key = main + L"|" + suffix;
         }
         if (key != f.shown || tex != f.shownIn) {
-            std::vector<uint8_t> px = f.kind == 3   ? PaxDraw(f.w, f.h, pax, g_gameMinutes.load(), g_haveGameTime.load(),
+            std::vector<uint8_t> px = f.kind == 5   ? std::vector<uint8_t>(static_cast<size_t>(f.w) * f.h * 4, 0)
+                                      : f.kind == 4 ? BootDraw(f.w, f.h, bootRunning ? bootT : g_bootArmed ? 0.0f : -1.0f)
+                                      : f.kind == 3 ? PaxDraw(f.w, f.h, pax, g_gameMinutes.load(), g_haveGameTime.load(),
                                                                 g_navSeconds.load(), g_navMeters.load())
                                       : f.kind == 2 ? DrawNowBar(f, now)
                                       : f.kind == 1 ? DrawSign(f, main)

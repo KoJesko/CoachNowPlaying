@@ -34,5 +34,7 @@ void EtaForgetView(ID3D11ShaderResourceView* s);
 ID3D11ShaderResourceView* EtaSwapFor(ID3D11ShaderResourceView* s);
 // Redraws texts that changed and uploads them (Present thread).
 void EtaUpload();
+// Telemetry truck.electric.enabled: switching on plays the start-up animation of the CarPlay screen.
+void EtaSetElectric(bool on);
 
 }  // namespace ep

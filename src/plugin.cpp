@@ -193,6 +193,11 @@ SCSAPI_VOID OnNavDistance(const scs_string_t, const scs_u32_t, const scs_value_t
     ep::EtaSetNavigationDistance(v && v->type == SCS_VALUE_TYPE_float ? v->value_float.value : 0.0f);
 }
 
+// Electrics on/off: the CarPlay screen plays its start-up animation when the bus is switched on.
+SCSAPI_VOID OnElectric(const scs_string_t, const scs_u32_t, const scs_value_t* const v, const scs_context_t) {
+    if (v && v->type == SCS_VALUE_TYPE_bool) ep::EtaSetElectric(v->value_bool.value != 0);
+}
+
 SCSAPI_VOID OnTimeScale(const scs_string_t, const scs_u32_t, const scs_value_t* const v, const scs_context_t) {
     if (v && v->type == SCS_VALUE_TYPE_float) ep::PaxSetTimeScale(v->value_float.value);
 }
@@ -309,6 +314,8 @@ extern "C" SCSAPI_RESULT scs_telemetry_init(const scs_u32_t version,
                                     SCS_TELEMETRY_CHANNEL_FLAG_none, OnNavDistance, nullptr);
             p->register_for_channel(SCS_TELEMETRY_TRUCK_CHANNEL_navigation_speed_limit, SCS_U32_NIL, SCS_VALUE_TYPE_float,
                                     SCS_TELEMETRY_CHANNEL_FLAG_none, OnSpeedLimit, nullptr);
+            p->register_for_channel(SCS_TELEMETRY_TRUCK_CHANNEL_electric_enabled, SCS_U32_NIL, SCS_VALUE_TYPE_bool,
+                                    SCS_TELEMETRY_CHANNEL_FLAG_none, OnElectric, nullptr);
             p->register_for_channel(SCS_TELEMETRY_CHANNEL_local_scale, SCS_U32_NIL, SCS_VALUE_TYPE_float,
                                     SCS_TELEMETRY_CHANNEL_FLAG_none, OnTimeScale, nullptr);
         }
