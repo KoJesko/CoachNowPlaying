@@ -49,6 +49,8 @@ ID3D11Texture2D* g_placeholder = nullptr;  // the game's texture (we keep one re
 ID3D11Texture2D* g_ourTex = nullptr;       // our private BGRA texture
 ID3D11ShaderResourceView* g_ourSrv = nullptr;
 std::atomic<ID3D11ShaderResourceView*> g_ourSrvAtomic{nullptr};
+// last time the game bound the MUSIK placeholder (= the music page is being drawn); uploads pause while it is hidden
+std::atomic<ULONGLONG> g_screenBoundTick{0};
 bool g_placeholderSrgb = false;
 
 constexpr int kMaxSwap = 8;
@@ -220,13 +222,15 @@ void UploadScreenFrame() {
             }
         }
         ULONGLONG now = GetTickCount64();
-        if (now - g_lastHeartbeat > 5000) {
+        if (now - g_lastHeartbeat > 60000) {
             g_lastHeartbeat = now;
             Logf("SCREEN alive: %llu frames uploaded so far", static_cast<unsigned long long>(g_uploadCount));
         }
     }
 
-    if (g_uploadFrames && dev && !g_removedLogged) {
+    // only while the music page is on screen (bound within the last second): no 2.6 MB uploads for a hidden page
+    const bool pageVisible = GetTickCount64() - g_screenBoundTick.load(std::memory_order_relaxed) < 1000;
+    if (g_uploadFrames && dev && !g_removedLogged && pageVisible) {
         if (tex != g_screenUploadedTo) {
             g_screenUploadedTo = tex;
             g_screenUploaded = 0;
@@ -368,6 +372,7 @@ void STDMETHODCALLTYPE HookPSSetSRV(ID3D11DeviceContext* ctx, UINT start, UINT n
         for (UINT i = 0; i < n; ++i) {
             ID3D11ShaderResourceView* s = srvsIn[i];
             isScreen[i] = ours && s && IsSwapSrv(s);
+            if (isScreen[i]) g_screenBoundTick.store(GetTickCount64(), std::memory_order_relaxed);
             ID3D11ShaderResourceView* rep = isScreen[i] ? ours : EtaSwapFor(s);
             if (rep) {
                 if (!any) {

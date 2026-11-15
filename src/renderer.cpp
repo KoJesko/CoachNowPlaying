@@ -24,6 +24,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <cstring>
 #include <vector>
 
 namespace ep {
@@ -725,9 +726,15 @@ void Run() {
                 double t = std::chrono::duration<double>(frameStart - start).count();
                 renderer.Frame(t);
                 {
+                    // Only hand over a new frame when the picture really changed: every new version is uploaded to the
+                    // GPU on the game's render thread (2.6 MB), doing that 15 times a second for an unchanged picture
+                    // caused small stutters.
+                    const auto& px = renderer.Pixels();
                     std::lock_guard<std::mutex> lock(g_frameMutex);
-                    g_front = renderer.Pixels();
-                    ++g_version;
+                    if (g_front.size() != px.size() || memcmp(g_front.data(), px.data(), px.size()) != 0) {
+                        g_front = px;
+                        ++g_version;
+                    }
                 }
                 auto spent = std::chrono::steady_clock::now() - frameStart;
                 auto budget = std::chrono::milliseconds(66);
