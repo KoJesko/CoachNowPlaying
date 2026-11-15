@@ -67,10 +67,11 @@ Field g_fields[6] = {
 };
 constexpr int kBootField = 4, kOffField = 5;
 
-// Start-up animation: armed while the black off page shows, started when the map page (with the boot placeholder)
-// is drawn after it.
+// Start-up animation: armed (overlay opaque black) while the screen is off - black off page or electrics off - and
+// started when a page with the boot placeholder is drawn after switching on.
 bool g_bootArmed = false;
 ULONGLONG g_bootStart = 0;
+ULONGLONG g_electricOnAt = 0;  // electrics switched on at this time; the animation waits until the screen is drawn
 std::atomic<int> g_electric{-1};             // -1 unknown, 0 off, 1 on
 std::atomic<bool> g_electricOnEvent{false};  // set by the telemetry thread, handled on the Present thread
 
@@ -525,14 +526,32 @@ void EtaUpload() {
         const ULONGLONG offSeen = g_fields[kOffField].lastBound.load(std::memory_order_relaxed);
         const ULONGLONG bootSeen = g_fields[kBootField].lastBound.load(std::memory_order_relaxed);
         // bus switched off: overlay black (ready), bus switched on: animation, whatever page is showing
-        if (g_electric.load() == 0) g_bootArmed = true;
-        if (g_electricOnEvent.exchange(false)) {
-            g_bootArmed = false;
-            g_bootStart = now;
-            Logf("BOOT bus switched on: start-up animation");
+        // a placeholder bound after `now` was read counts as just seen (no unsigned underflow)
+        auto recent = [now](ULONGLONG seen) { return seen != 0 && (seen >= now || now - seen < 400); };
+        const int electric = g_electric.load();
+        if (electric == 0) {
+            g_bootArmed = true;
+            g_electricOnAt = 0;
         }
-        if (offSeen != 0 && now - offSeen < 400) g_bootArmed = true;
-        if (g_bootArmed && g_electric.load() != 0 && bootSeen > offSeen && now - bootSeen < 400) {
+        if (g_electricOnEvent.exchange(false)) {
+            // switched on (or loaded with the electrics on): play as soon as the screen is actually drawn - not during
+            // the game's loading screen or while the player looks from outside
+            g_bootArmed = true;
+            g_electricOnAt = now;
+        }
+        if (g_electricOnAt != 0) {
+            if (bootSeen > g_electricOnAt) {
+                g_bootArmed = false;
+                g_electricOnAt = 0;
+                g_bootStart = now;
+                Logf("BOOT bus switched on: start-up animation");
+            } else if (now - g_electricOnAt > 15000) {
+                g_bootArmed = false;  // screen not drawn (other vehicle, outside view): give up, no black overlay left
+                g_electricOnAt = 0;
+            }
+        }
+        if (recent(offSeen)) g_bootArmed = true;
+        if (g_bootArmed && electric != 0 && g_electricOnAt == 0 && bootSeen > offSeen && recent(bootSeen)) {
             g_bootArmed = false;
             g_bootStart = now;
             Logf("BOOT screen switched on again: start-up animation");
