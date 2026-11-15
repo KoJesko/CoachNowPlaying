@@ -17,7 +17,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
+#include <functional>
 #include <memory>
+#include <thread>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -82,6 +86,58 @@ std::string g_plateRaw, g_plateCountry;
 
 std::mutex g_mx;  // guards placeholder/tex/srv of all fields
 ULONGLONG g_lastLog = 0;
+
+// Drawing thread: the pictures (GDI text, passenger TV 1024x760, cover decoding, boot animation) used to be drawn on
+// the game's render thread inside Present, which held up the game's frame every time a text changed (small stutters,
+// e.g. every in-game minute for the passenger TV). Now the Present thread only queues a job and uploads finished
+// pictures; one job per field at a time, a newer key is queued once the previous picture is back.
+struct DrawDone {
+    bool has = false;
+    std::wstring key;
+    ID3D11Texture2D* tex = nullptr;  // only compared, never dereferenced
+    std::vector<uint8_t> px;
+};
+struct DrawJob {
+    size_t field;
+    std::wstring key;
+    ID3D11Texture2D* tex;
+    std::function<std::vector<uint8_t>()> draw;
+};
+std::mutex g_jobMx;
+std::condition_variable g_jobCv;
+std::deque<DrawJob> g_jobs;
+DrawDone g_done[7];
+bool g_busy[7] = {};
+bool g_drawStop = false;
+std::thread g_drawThread;
+
+void DrawThread() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);  // WIC (cover pictures)
+    for (;;) {
+        DrawJob job;
+        {
+            std::unique_lock<std::mutex> lock(g_jobMx);
+            g_jobCv.wait(lock, [] { return g_drawStop || !g_jobs.empty(); });
+            if (g_drawStop) break;
+            job = std::move(g_jobs.front());
+            g_jobs.pop_front();
+        }
+        std::vector<uint8_t> px = job.draw();
+        std::lock_guard<std::mutex> lock(g_jobMx);
+        g_done[job.field] = DrawDone{true, std::move(job.key), job.tex, std::move(px)};
+        g_busy[job.field] = false;
+    }
+    CoUninitialize();
+}
+
+void DrawQueue(size_t field, const std::wstring& key, ID3D11Texture2D* tex, std::function<std::vector<uint8_t>()> draw) {
+    std::lock_guard<std::mutex> lock(g_jobMx);
+    if (g_drawStop || g_busy[field] || g_done[field].has) return;  // previous picture not uploaded yet: next frame
+    if (!g_drawThread.joinable()) g_drawThread = std::thread(DrawThread);
+    g_busy[field] = true;
+    g_jobs.push_back(DrawJob{field, key, tex, std::move(draw)});
+    g_jobCv.notify_one();
+}
 
 void EtaText(std::wstring& main, std::wstring& suffix) {
     const float nav = g_navSeconds.load();
@@ -531,6 +587,16 @@ ID3D11ShaderResourceView* EtaSwapFor(ID3D11ShaderResourceView* s) {
     return nullptr;
 }
 
+void EtaStop() {
+    {
+        std::lock_guard<std::mutex> lock(g_jobMx);
+        g_drawStop = true;
+        g_jobs.clear();
+    }
+    g_jobCv.notify_all();
+    if (g_drawThread.joinable()) g_drawThread.join();
+}
+
 void EtaUpload() {
     const ULONGLONG now = GetTickCount64();
     PaxTick(g_gameMinutes.load(), g_navSeconds.load(), g_navMeters.load());
@@ -606,28 +672,48 @@ void EtaUpload() {
         } else {
             key = main + L"|" + suffix;
         }
-        if (key != f.shown || tex != f.shownIn) {
-            std::vector<uint8_t> px = f.kind == 6   ? PlateDraw(f.w, f.h, plateText, plateCountry)
-                                      : f.kind == 5 ? std::vector<uint8_t>(static_cast<size_t>(f.w) * f.h * 4, 0)
-                                      : f.kind == 4 ? BootDraw(f.w, f.h, bootRunning ? bootT : g_bootArmed ? 0.0f : -1.0f)
-                                      : f.kind == 3 ? PaxDraw(f.w, f.h, pax, g_gameMinutes.load(), g_haveGameTime.load(),
-                                                                g_navSeconds.load(), g_navMeters.load())
-                                      : f.kind == 2 ? DrawNowBar(f, now)
-                                      : f.kind == 1 ? DrawSign(f, main)
-                                                    : Draw(f, main, suffix);
+        const size_t fi = static_cast<size_t>(&f - g_fields);
+        // a picture the drawing thread finished: upload it (cheap), never draw on this thread (the game's render thread)
+        DrawDone done;
+        {
+            std::lock_guard<std::mutex> lock(g_jobMx);
+            if (g_done[fi].has) {
+                done = std::move(g_done[fi]);
+                g_done[fi] = DrawDone{};
+            }
+        }
+        if (done.has && done.tex == tex) {
             ID3D11Device* dev = nullptr;
             tex->GetDevice(&dev);
             if (dev) {
                 ID3D11DeviceContext* ctx = nullptr;
                 dev->GetImmediateContext(&ctx);
                 if (ctx) {
-                    ctx->UpdateSubresource(tex, 0, nullptr, px.data(), f.w * 4, 0);
+                    ctx->UpdateSubresource(tex, 0, nullptr, done.px.data(), f.w * 4, 0);
                     ctx->Release();
-                    f.shown = key;
+                    f.shown = done.key;
                     f.shownIn = tex;
                 }
                 dev->Release();
             }
+        }
+        if (key != f.shown || tex != f.shownIn) {
+            Field* fp = &f;
+            std::function<std::vector<uint8_t>()> draw;
+            const uint32_t gm = g_gameMinutes.load();
+            const bool ht = g_haveGameTime.load();
+            const float ns = g_navSeconds.load(), nm = g_navMeters.load();
+            const float bt = bootRunning ? bootT : g_bootArmed ? 0.0f : -1.0f;
+            switch (f.kind) {
+                case 6: draw = [fp, plateText, plateCountry] { return PlateDraw(fp->w, fp->h, plateText, plateCountry); }; break;
+                case 5: draw = [fp] { return std::vector<uint8_t>(static_cast<size_t>(fp->w) * fp->h * 4, 0); }; break;
+                case 4: draw = [fp, bt] { return BootDraw(fp->w, fp->h, bt); }; break;
+                case 3: draw = [fp, pax, gm, ht, ns, nm] { return PaxDraw(fp->w, fp->h, pax, gm, ht, ns, nm); }; break;
+                case 2: draw = [fp, now] { return DrawNowBar(*fp, now); }; break;
+                case 1: draw = [fp, main] { return DrawSign(*fp, main); }; break;
+                default: draw = [fp, main, suffix] { return Draw(*fp, main, suffix); }; break;
+            }
+            DrawQueue(fi, key, tex, std::move(draw));
         }
         tex->Release();
     }

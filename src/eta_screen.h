@@ -35,6 +35,8 @@ void EtaForgetView(ID3D11ShaderResourceView* s);
 ID3D11ShaderResourceView* EtaSwapFor(ID3D11ShaderResourceView* s);
 // Redraws texts that changed and uploads them (Present thread).
 void EtaUpload();
+// Stops the drawing thread (plugin shutdown, after the D3D11 hooks are off).
+void EtaStop();
 // Telemetry truck.electric.enabled: switching on plays the start-up animation of the CarPlay screen.
 void EtaSetElectric(bool on);
 // Telemetry config truck license.plate / license.plate.country.id: drawn on the rear luggage box placeholder.

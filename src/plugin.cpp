@@ -338,6 +338,7 @@ extern "C" SCSAPI_VOID scs_telemetry_shutdown(void) {
     ep::Logf("shutdown");
     ep::NetHooksDisable();
     ep::D3D11HooksDisable();
+    ep::EtaStop();
     ep::RendererStop();
     ep::ExtraSourcesStop();
     ep::StationLogoStop();

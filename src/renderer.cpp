@@ -153,6 +153,8 @@ public:
     const std::vector<uint8_t>& Pixels() const { return pixels_; }
 
 private:
+    bool RecreateTarget();
+    uint64_t endDrawFailures_ = 0;
     ComPtr<IDWriteTextFormat> Format(float size, DWRITE_FONT_WEIGHT weight, bool wrap);
     void Text(const std::wstring& s, float x, float y, float w, float h, float size, DWRITE_FONT_WEIGHT weight,
               D2D1_COLOR_F color, bool wrap = false, DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING,
@@ -222,10 +224,22 @@ bool Renderer::Init() {
                                   WICBitmapCacheOnDemand, bitmap_.GetAddressOf()))) return false;
     D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
         D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_UNKNOWN, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
+    pixels_.assign(static_cast<size_t>(kScreenWidth) * kScreenHeight * 4, 0);
+    return RecreateTarget();
+}
+
+// (Re)creates the render target and everything that belongs to it (brush, cover bitmaps).
+bool Renderer::RecreateTarget() {
+    brush_.Reset();
+    cover_.Reset();
+    bg_.Reset();
+    coverKey_ = ~0ull;  // cover is made again on the next frame
+    rt_.Reset();
+    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_UNKNOWN, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
     if (FAILED(d2d_->CreateWicBitmapRenderTarget(bitmap_.Get(), props, rt_.GetAddressOf()))) return false;
     rt_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     if (FAILED(rt_->CreateSolidColorBrush(Rgb(1, 1, 1), brush_.GetAddressOf()))) return false;
-    pixels_.assign(static_cast<size_t>(kScreenWidth) * kScreenHeight * 4, 0);
     return true;
 }
 
@@ -698,7 +712,13 @@ void Renderer::Frame(double t) {
     DrawTouchCursor();
     HRESULT hr = rt_->EndDraw();
     if (FAILED(hr)) {
-        Logf("RENDER EndDraw failed: 0x%08lx", static_cast<unsigned long>(hr));
+        // D2DERR_RECREATE_TARGET (0x8899000C) never goes away by itself: build the target and its resources again.
+        // Logged rarely - this used to write ~15 lines a second to diag.log for the rest of the session.
+        ++endDrawFailures_;
+        if (endDrawFailures_ <= 3 || endDrawFailures_ % 1000 == 0)
+            Logf("RENDER EndDraw failed: 0x%08lx (%llu times), rebuilding the render target", static_cast<unsigned long>(hr),
+                 static_cast<unsigned long long>(endDrawFailures_));
+        if (!RecreateTarget() && endDrawFailures_ <= 3) Logf("RENDER rebuilding the render target failed");
         return;
     }
     CopyOut();
