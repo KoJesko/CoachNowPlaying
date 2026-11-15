@@ -2,6 +2,7 @@
 #include "common.h"
 
 #include <d3d11.h>
+#include <string>
 
 namespace ep {
 
@@ -36,5 +37,7 @@ ID3D11ShaderResourceView* EtaSwapFor(ID3D11ShaderResourceView* s);
 void EtaUpload();
 // Telemetry truck.electric.enabled: switching on plays the start-up animation of the CarPlay screen.
 void EtaSetElectric(bool on);
+// Telemetry config truck license.plate / license.plate.country.id: drawn on the rear luggage box placeholder.
+void EtaSetPlate(const std::string& plate, const std::string& countryId);
 
 }  // namespace ep

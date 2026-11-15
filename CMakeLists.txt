@@ -37,6 +37,7 @@ add_library(CoachNowPlaying SHARED
     src/eta_screen.cpp
     src/passenger.cpp
     src/boot_anim.cpp
+    src/plate.cpp
     src/exports.def)
 set_target_properties(CoachNowPlaying PROPERTIES PREFIX "")
 target_include_directories(CoachNowPlaying PRIVATE src third_party/scssdk/include)

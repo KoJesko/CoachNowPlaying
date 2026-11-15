@@ -1,6 +1,7 @@
 #include "eta_screen.h"
 
 #include "boot_anim.h"
+#include "plate.h"
 
 #include "cover_lookup.h"
 #include "log.h"
@@ -43,7 +44,7 @@ struct Field {
     bool center;
     const wchar_t* face;
     int weight;
-    int kind;          // 0 = ETA, 1 = LIMIT, 2 = NOW PLAYING bar, 3 = passenger TV, 4 = boot animation, 5 = off marker
+    int kind;          // 0 = ETA, 1 = LIMIT, 2 = NOW PLAYING bar, 3 = passenger TV, 4 = boot animation, 5 = off marker, 6 = number plate
 
     ID3D11Texture2D* placeholder = nullptr;
     ID3D11Texture2D* tex = nullptr;
@@ -57,13 +58,14 @@ struct Field {
 };
 
 // Colours match the mod: card 0xFF1A1E26, text 0xFFE4E7EC, sign digits 0xFF101215.
-Field g_fields[6] = {
+Field g_fields[7] = {
     {"ETA", 52, 1996, 256, 96, true, RGB(0x1A, 0x1E, 0x26), RGB(0xE4, 0xE7, 0xEC), 84, false, L"Segoe UI Semibold", FW_SEMIBOLD, 0},
     {"LIMIT", 44, 1996, 128, 128, false, RGB(0, 0, 0), RGB(0x10, 0x12, 0x15), 54, true, L"Arial", FW_BOLD, 1},
     {"NOWBAR", 36, 1996, 768, 96, true, RGB(0x1A, 0x1E, 0x26), RGB(0xE4, 0xE7, 0xEC), 36, false, L"Segoe UI Semibold", FW_SEMIBOLD, 2},
     {"PAXTV", 1024, 760, 1024, 760, true, RGB(0x0E, 0x11, 0x17), RGB(0xFF, 0xFF, 0xFF), 0, false, L"Segoe UI", FW_NORMAL, 3},
     {"BOOT", 28, 1996, 640, 360, false, RGB(0, 0, 0), RGB(0, 0, 0), 0, false, L"Segoe UI", FW_NORMAL, 4},
     {"OFF", 20, 1996, 4, 4, true, RGB(0, 0, 0), RGB(0, 0, 0), 0, false, L"Segoe UI", FW_NORMAL, 5},
+    {"PLATE", 12, 1996, 1040, 220, true, RGB(0, 0, 0), RGB(0, 0, 0), 0, false, L"Bahnschrift", FW_NORMAL, 6},
 };
 constexpr int kBootField = 4, kOffField = 5;
 
@@ -74,6 +76,9 @@ ULONGLONG g_bootStart = 0;
 ULONGLONG g_electricOnAt = 0;  // electrics switched on at this time; the animation waits until the screen is drawn
 std::atomic<int> g_electric{-1};             // -1 unknown, 0 off, 1 on
 std::atomic<bool> g_electricOnEvent{false};  // set by the telemetry thread, handled on the Present thread
+
+std::mutex g_plateMx;                        // number plate from the telemetry (telemetry thread -> Present thread)
+std::string g_plateRaw, g_plateCountry;
 
 std::mutex g_mx;  // guards placeholder/tex/srv of all fields
 ULONGLONG g_lastLog = 0;
@@ -406,6 +411,13 @@ void EtaSetElectric(bool on) {
     if (on && prev != 1) g_electricOnEvent = true;  // also the first value after loading: the bus comes alive
 }
 void EtaSetNavigationDistance(float meters) { g_navMeters = meters; }
+void EtaSetPlate(const std::string& plate, const std::string& countryId) {
+    std::lock_guard<std::mutex> lock(g_plateMx);
+    if (plate == g_plateRaw && countryId == g_plateCountry) return;
+    g_plateRaw = plate;
+    g_plateCountry = countryId;
+    Logf("PLATE telemetry: \"%s\" country \"%s\"", plate.c_str(), countryId.c_str());
+}
 void EtaSetSpeedLimit(float metersPerSecond) { g_speedLimit = metersPerSecond; }
 
 bool EtaIsPlaceholder(const D3D11_TEXTURE2D_DESC* d) {
@@ -570,6 +582,8 @@ void EtaUpload() {
         std::wstring main, suffix, key;
         NowInfo now;
         PaxView pax;
+        std::wstring plateText;
+        std::string plateCountry;
         if (f.kind == 0) EtaText(main, suffix);
         else if (f.kind == 1) LimitText(main);
         if (f.kind == 2) {
@@ -584,11 +598,17 @@ void EtaUpload() {
             key = bootRunning ? L"run|" + std::to_wstring(static_cast<int>(bootT * 30.0f)) : g_bootArmed ? L"armed" : L"idle";
         } else if (f.kind == 5) {
             key = L"off";
+        } else if (f.kind == 6) {
+            std::lock_guard<std::mutex> lock(g_plateMx);
+            plateText = PlateText(g_plateRaw);
+            plateCountry = g_plateCountry;
+            key = L"plate|" + plateText + L"|" + std::wstring(plateCountry.begin(), plateCountry.end());
         } else {
             key = main + L"|" + suffix;
         }
         if (key != f.shown || tex != f.shownIn) {
-            std::vector<uint8_t> px = f.kind == 5   ? std::vector<uint8_t>(static_cast<size_t>(f.w) * f.h * 4, 0)
+            std::vector<uint8_t> px = f.kind == 6   ? PlateDraw(f.w, f.h, plateText, plateCountry)
+                                      : f.kind == 5 ? std::vector<uint8_t>(static_cast<size_t>(f.w) * f.h * 4, 0)
                                       : f.kind == 4 ? BootDraw(f.w, f.h, bootRunning ? bootT : g_bootArmed ? 0.0f : -1.0f)
                                       : f.kind == 3 ? PaxDraw(f.w, f.h, pax, g_gameMinutes.load(), g_haveGameTime.load(),
                                                                 g_navSeconds.load(), g_navMeters.load())

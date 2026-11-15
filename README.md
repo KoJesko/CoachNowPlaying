@@ -17,8 +17,11 @@ Optional ETS2 plugin for the Steam Workshop mod **"CarPlay-Style Infotainment fo
   release ZIP); without it the Windows voice is used.
 - **Start-up animation** on the CarPlay screen (mod 0.7.0 or newer): when the bus is switched on, and when the screen
   comes back from the black OFF page, four dots circle and merge into the ROADWORKS logo before the page shows.
+- **Number plate on the rear luggage box** (mod "Rear Luggage Box for MAN Lion's Coach"): the game only shows the plate
+  on the bus itself (hidden behind the box), so the plugin draws the bus's plate onto the box – text and country from
+  the telemetry (EU band with stars and country code, yellow for UK).
 
-The mod works without the plugin; these extras need it.
+The mods work without the plugin; these extras need it.
 
 ## Download & install
 1. Download **`CoachNowPlaying_v*.zip`** from [Releases](../../releases).
@@ -77,7 +80,8 @@ Tempolimit-Zahl im Schild, Live-Fahrgastanzeige auf dem Fernseher im MAN Lion's 
 „Nächster Halt“) und eine Ansage etwa 5 Minuten vor dem Ziel mit Gong und natürlicher Stimme („Thorsten“, Piper, offline).
 Einstellungen unter `[announce]` in der INI (an/aus, Minuten, Lautstärke). Dazu eine Startanimation auf dem
 CarPlay-Bildschirm (ab Mod 0.7.0), wenn der Bus eingeschaltet wird und wenn das Display von der schwarzen Seite wieder
-angeht.
+angeht. Mit der Mod „Rear Luggage Box for MAN Lion's Coach“ zeichnet das Plugin außerdem das Kennzeichen des Busses auf
+die Heckbox (das Spiel zeigt es nur am Bus selbst).
 
 **Steuerung:** Seiten mit „Infotainment Display Mode“, Radio mit den Radio-Tasten des Spiels.
 

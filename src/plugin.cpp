@@ -21,6 +21,7 @@
 extern "C" {
 #include <scssdk_telemetry.h>
 #include <common/scssdk_telemetry_common_channels.h>
+#include <common/scssdk_telemetry_common_configs.h>
 #include <common/scssdk_telemetry_truck_common_channels.h>
 }
 #include "eta_screen.h"
@@ -226,6 +227,14 @@ SCSAPI_VOID OnConfiguration(const scs_event_t, const void* const info, const scs
                 ident += std::string(a->value.value_string.value) + " ";
         }
         if (!ident.empty()) ep::PaxSetVehicle(ident);
+        // number plate of the bus: drawn by the plugin on the rear luggage box (the game only uses the cabin's plate)
+        std::string plate, country;
+        for (const scs_named_value_t* a = c->attributes; a && a->name; ++a) {
+            if (a->value.type != SCS_VALUE_TYPE_string || !a->value.value_string.value) continue;
+            if (strcmp(a->name, SCS_TELEMETRY_CONFIG_ATTRIBUTE_license_plate) == 0) plate = a->value.value_string.value;
+            else if (strcmp(a->name, SCS_TELEMETRY_CONFIG_ATTRIBUTE_license_plate_country_id) == 0) country = a->value.value_string.value;
+        }
+        if (!plate.empty()) ep::EtaSetPlate(plate, country);
     } else if (strcmp(c->id, "job") == 0) {
         std::string src, dst;
         float km = 0.0f;
