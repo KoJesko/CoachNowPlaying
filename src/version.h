@@ -1,4 +1,4 @@
 #pragma once
 
 // CoachNowPlaying version (based on EtsNowPlaying 1.1.4 by jxhnch)
-#define ETSNP_VERSION "0.4.2"
+#define ETSNP_VERSION "0.5.0"

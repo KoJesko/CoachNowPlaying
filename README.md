@@ -9,14 +9,21 @@ Optional ETS2 plugin for the Steam Workshop mod **"CarPlay-Style Infotainment fo
 - **Arrival time as a real clock time** – the game's own field shows the remaining travel time ("25:08");
   the plugin shows e.g. `22:52 +1` (tomorrow).
 - **Speed limit digits** on the sign, read from the telemetry.
+- **Passenger TV** (MAN Lion's Coach): destination, arrival time, remaining distance, clock, progress bar and
+  "Next stop" shortly before arrival, on the TV at the front ceiling.
+- **Arrival announcement** in coaches: about 5 minutes before the destination a soft chime and a natural German voice
+  announce the destination ("Sehr geehrte Fahrgäste, wir erreichen in wenigen Minuten …"), sounding like the driver at
+  the microphone. Uses [Piper](https://github.com/rhasspy/piper) with the voice "Thorsten" (offline, included in the
+  release ZIP); without it the Windows voice is used.
 
 The mod works without the plugin; these extras need it.
 
 ## Download & install
 1. Download **`CoachNowPlaying_v*.zip`** from [Releases](../../releases).
 2. Close the game.
-3. Copy `CoachNowPlaying.dll` to `...\Steam\steamapps\common\Euro Truck Simulator 2\bin\win_x64\plugins\`
-   (create the `plugins` folder if it does not exist).
+3. Copy `CoachNowPlaying.dll` **and the folder `CoachNowPlaying_piper`** to
+   `...\Steam\steamapps\common\Euro Truck Simulator 2\bin\win_x64\plugins\` (create the `plugins` folder if it does not
+   exist). The folder is only needed for the voice announcements.
 4. Start the game and confirm the message about plugins / advanced SDK features.
 
 Do not use it together with EtsNowPlaying.
@@ -32,6 +39,10 @@ Do not use it together with EtsNowPlaying.
 sent to iTunes Search, Deezer and radio-browser.info to find covers / logos. Set `cover_lookup=0` to switch this off.
 No accounts, no tracking.
 
+Announcements: section `[announce]` – `enabled` (1/0), `minutes` (real minutes before arrival, default 5), `volume`
+(0..100), `language` (`auto` = German, `en` = English with the Windows voice). The sound plays through Windows, not
+through the game's volume settings.
+
 **Convoy:** if joining a Convoy session fails with "DLCs do not match", set `[radio] stream_titles=0` in the INI.
 The radio info (music page, now playing bar) is then off; arrival time and speed limit keep working.
 
@@ -45,7 +56,8 @@ Telemetry comes from the official SCS SDK. A game update therefore rarely breaks
 
 ## Credits & license
 Based on [EtsNowPlaying](https://github.com/jxhnch/EtsNowPlaying) by jxhnch, MIT License (see `LICENSE`).
-Includes MinHook and the SCS SDK headers, see `THIRD_PARTY_NOTICES.md`.
+Includes MinHook and the SCS SDK headers, see `THIRD_PARTY_NOTICES.md`. The release ZIP also contains Piper (MIT),
+ONNX Runtime (MIT), eSpeak NG (GPL-3.0) and the Piper voice "Thorsten" (CC0), see `THIRD_PARTY_NOTICES.md`.
 Not affiliated with SCS Software, Apple, Deezer or TruckersMP. Use at your own risk.
 
 ---
@@ -55,10 +67,13 @@ Not affiliated with SCS Software, Apple, Deezer or TruckersMP. Use at your own r
 Optionales Plugin für die Workshop-Mod **„CarPlay-Style Infotainment for Coaches“**.
 
 **Installation:** Spiel schließen → `CoachNowPlaying.dll` aus der ZIP unter [Releases](../../releases) nach
-`...\Euro Truck Simulator 2\bin\win_x64\plugins\` kopieren → beim nächsten Start die Plugin-Meldung bestätigen.
+`...\Euro Truck Simulator 2\bin\win_x64\plugins\` kopieren, dazu den Ordner `CoachNowPlaying_piper` (Stimme für die
+Ansagen) → beim nächsten Start die Plugin-Meldung bestätigen.
 
 **Bringt:** Musik-Seite und „Läuft gerade“-Leiste fürs Ingame-Radio (nur sichtbar, wenn das Radio läuft), echte Ankunftsuhrzeit statt Restzeit,
-Tempolimit-Zahl im Schild.
+Tempolimit-Zahl im Schild, Live-Fahrgastanzeige auf dem Fernseher im MAN Lion's Coach (Ziel, Ankunft, Fortschritt,
+„Nächster Halt“) und eine Ansage etwa 5 Minuten vor dem Ziel mit Gong und natürlicher Stimme („Thorsten“, Piper, offline).
+Einstellungen unter `[announce]` in der INI (an/aus, Minuten, Lautstärke).
 
 **Steuerung:** Seiten mit „Infotainment Display Mode“, Radio mit den Radio-Tasten des Spiels.
 

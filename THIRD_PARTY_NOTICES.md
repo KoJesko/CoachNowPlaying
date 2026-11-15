@@ -9,3 +9,17 @@ EtsNowPlaying includes the following third-party code. Their licenses apply to t
 
 The plugin additionally uses these Windows components at run time: Direct3D 11, DXGI, Direct2D, DirectWrite, WIC, WinHTTP,
 and the Windows Runtime media control APIs. No other libraries are linked.
+
+## Bundled in the release ZIP (folder `CoachNowPlaying_piper`, used for the arrival announcements)
+
+These programs are shipped unchanged as separate executables/libraries next to the plugin; the plugin only starts
+`piper.exe`. Their licenses apply to them.
+
+| Component | License | Source |
+|---|---|---|
+| Piper text-to-speech (`piper.exe`, `piper_phonemize.dll`), release 2023.11.14-2 | MIT | https://github.com/rhasspy/piper |
+| ONNX Runtime (`onnxruntime*.dll`) | MIT | https://github.com/microsoft/onnxruntime |
+| eSpeak NG (`espeak-ng.dll`, `espeak-ng-data`) | GPL-3.0-or-later | https://github.com/rhasspy/espeak-ng (fork used by Piper) |
+| Piper voice `de_DE-thorsten-high` | CC0 (Thorsten-Voice dataset) | https://huggingface.co/rhasspy/piper-voices |
+
+eSpeak NG is licensed under the GNU GPL version 3; its complete source code is available at the link above.

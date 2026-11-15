@@ -35,6 +35,7 @@ add_library(CoachNowPlaying SHARED
     src/station_logo.cpp
     src/renderer.cpp
     src/eta_screen.cpp
+    src/passenger.cpp
     src/exports.def)
 set_target_properties(CoachNowPlaying PROPERTIES PREFIX "")
 target_include_directories(CoachNowPlaying PRIVATE src third_party/scssdk/include)
@@ -42,4 +43,4 @@ target_compile_definitions(CoachNowPlaying PRIVATE
     WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(CoachNowPlaying PRIVATE /utf-8 /EHsc /permissive- /W3)
 target_link_libraries(CoachNowPlaying PRIVATE
-    minhook d3d11 dxgi d2d1 dwrite windowscodecs winhttp ws2_32 windowsapp shell32 ole32 gdi32)
+    minhook d3d11 dxgi d2d1 dwrite windowscodecs winhttp ws2_32 windowsapp shell32 ole32 gdi32 winmm sapi)

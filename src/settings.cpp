@@ -2,6 +2,7 @@
 
 #include "log.h"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace ep {
@@ -53,7 +54,17 @@ void LoadSettings(const std::wstring& dir) {
                 "\r\n"
                 "[touch]\r\n"
                 "; 1 = the buttons on the screen can be clicked with the mouse.\r\n"
-                "enabled=1\r\n";
+                "enabled=1\r\n"
+                "\r\n"
+                "[announce]\r\n"
+                "; 1 = in coaches a chime and a voice announce the destination a few minutes before arrival. 0 = off.\r\n"
+                "enabled=1\r\n"
+                "; real minutes before arrival\r\n"
+                "minutes=5\r\n"
+                "; 0..100\r\n"
+                "volume=80\r\n"
+                "; auto = German voice if Windows has one, else English. en = always English.\r\n"
+                "language=auto\r\n";
             fwrite(text, 1, sizeof(text) - 1, f);
             fclose(f);
         }
@@ -65,6 +76,10 @@ void LoadSettings(const std::wstring& dir) {
     EnsureKey(ini, L"radio", L"cover_lookup", L"1");
     EnsureKey(ini, L"radio", L"extra_sources", L"1");
     EnsureKey(ini, L"touch", L"enabled", L"1");
+    EnsureKey(ini, L"announce", L"enabled", L"1");
+    EnsureKey(ini, L"announce", L"minutes", L"5");
+    EnsureKey(ini, L"announce", L"volume", L"80");
+    EnsureKey(ini, L"announce", L"language", L"auto");
     WritePrivateProfileStringW(L"beta", L"touch", nullptr, ini.c_str());
     WritePrivateProfileStringW(L"radio", L"stale_ms", nullptr, ini.c_str());
     WritePrivateProfileStringW(L"radio", L"hold_ms", nullptr, ini.c_str());
@@ -80,6 +95,14 @@ void LoadSettings(const std::wstring& dir) {
     g_settings.touch = GetPrivateProfileIntW(L"touch", L"enabled", 1, ini.c_str()) != 0;
     g_settings.textureFinder = GetPrivateProfileIntW(L"debug", L"texture_finder", 0, ini.c_str()) != 0;
     g_settings.autoFit = static_cast<int>(GetPrivateProfileIntW(L"screen", L"auto_fit", 1, ini.c_str()));
+    g_settings.announce = GetPrivateProfileIntW(L"announce", L"enabled", 1, ini.c_str()) != 0;
+    g_settings.announceMinutes = std::max(1, static_cast<int>(GetPrivateProfileIntW(L"announce", L"minutes", 5, ini.c_str())));
+    g_settings.announceVolume = static_cast<int>(GetPrivateProfileIntW(L"announce", L"volume", 80, ini.c_str()));
+    {
+        wchar_t lang[16] = {};
+        GetPrivateProfileStringW(L"announce", L"language", L"auto", lang, 16, ini.c_str());
+        g_settings.announceLanguage = lang;
+    }
 
     wchar_t filter[128] = {};
     GetPrivateProfileStringW(L"media", L"app_filter", L"spotify", filter, 128, ini.c_str());

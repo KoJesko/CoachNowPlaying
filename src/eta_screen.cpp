@@ -2,6 +2,7 @@
 
 #include "cover_lookup.h"
 #include "log.h"
+#include "passenger.h"
 #include "radio_tracker.h"
 #include "settings.h"
 #include "station_logo.h"
@@ -40,7 +41,7 @@ struct Field {
     bool center;
     const wchar_t* face;
     int weight;
-    int kind;          // 0 = ETA, 1 = LIMIT, 2 = NOW PLAYING bar
+    int kind;          // 0 = ETA, 1 = LIMIT, 2 = NOW PLAYING bar, 3 = passenger TV
 
     ID3D11Texture2D* placeholder = nullptr;
     ID3D11Texture2D* tex = nullptr;
@@ -53,10 +54,11 @@ struct Field {
 };
 
 // Colours match the mod: card 0xFF1A1E26, text 0xFFE4E7EC, sign digits 0xFF101215.
-Field g_fields[3] = {
+Field g_fields[4] = {
     {"ETA", 52, 1996, 256, 96, true, RGB(0x1A, 0x1E, 0x26), RGB(0xE4, 0xE7, 0xEC), 84, false, L"Segoe UI Semibold", FW_SEMIBOLD, 0},
     {"LIMIT", 44, 1996, 128, 128, false, RGB(0, 0, 0), RGB(0x10, 0x12, 0x15), 54, true, L"Arial", FW_BOLD, 1},
     {"NOWBAR", 36, 1996, 768, 96, true, RGB(0x1A, 0x1E, 0x26), RGB(0xE4, 0xE7, 0xEC), 36, false, L"Segoe UI Semibold", FW_SEMIBOLD, 2},
+    {"PAXTV", 1024, 760, 1024, 760, true, RGB(0x0E, 0x11, 0x17), RGB(0xFF, 0xFF, 0xFF), 0, false, L"Segoe UI", FW_NORMAL, 3},
 };
 
 std::mutex g_mx;  // guards placeholder/tex/srv of all fields
@@ -498,6 +500,7 @@ ID3D11ShaderResourceView* EtaSwapFor(ID3D11ShaderResourceView* s) {
 
 void EtaUpload() {
     const ULONGLONG now = GetTickCount64();
+    PaxTick(g_gameMinutes.load(), g_navSeconds.load(), g_navMeters.load());
     for (auto& f : g_fields) {
         ID3D11Texture2D* tex = nullptr;
         {
@@ -508,16 +511,24 @@ void EtaUpload() {
         if (!tex) continue;
         std::wstring main, suffix, key;
         NowInfo now;
+        PaxView pax;
         if (f.kind == 0) EtaText(main, suffix);
         else if (f.kind == 1) LimitText(main);
         if (f.kind == 2) {
             now = GetNow();
             key = now.key;
+        } else if (f.kind == 3) {
+            pax = PaxGetView(g_gameMinutes.load(), g_haveGameTime.load(), g_navSeconds.load(), g_navMeters.load());
+            key = pax.key;
         } else {
             key = main + L"|" + suffix;
         }
         if (key != f.shown || tex != f.shownIn) {
-            std::vector<uint8_t> px = f.kind == 2 ? DrawNowBar(f, now) : f.kind == 1 ? DrawSign(f, main) : Draw(f, main, suffix);
+            std::vector<uint8_t> px = f.kind == 3   ? PaxDraw(f.w, f.h, pax, g_gameMinutes.load(), g_haveGameTime.load(),
+                                                                g_navSeconds.load(), g_navMeters.load())
+                                      : f.kind == 2 ? DrawNowBar(f, now)
+                                      : f.kind == 1 ? DrawSign(f, main)
+                                                    : Draw(f, main, suffix);
             ID3D11Device* dev = nullptr;
             tex->GetDevice(&dev);
             if (dev) {

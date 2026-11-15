@@ -24,6 +24,7 @@ extern "C" {
 #include <common/scssdk_telemetry_truck_common_channels.h>
 }
 #include "eta_screen.h"
+#include "passenger.h"
 
 #include <MinHook.h>
 #include <thread>
@@ -192,9 +193,47 @@ SCSAPI_VOID OnNavDistance(const scs_string_t, const scs_u32_t, const scs_value_t
     ep::EtaSetNavigationDistance(v && v->type == SCS_VALUE_TYPE_float ? v->value_float.value : 0.0f);
 }
 
+SCSAPI_VOID OnTimeScale(const scs_string_t, const scs_u32_t, const scs_value_t* const v, const scs_context_t) {
+    if (v && v->type == SCS_VALUE_TYPE_float) ep::PaxSetTimeScale(v->value_float.value);
+}
+
+double NumberOf(const scs_value_t& v) {
+    switch (v.type) {
+        case SCS_VALUE_TYPE_u32: return v.value_u32.value;
+        case SCS_VALUE_TYPE_s32: return v.value_s32.value;
+        case SCS_VALUE_TYPE_u64: return static_cast<double>(v.value_u64.value);
+        case SCS_VALUE_TYPE_s64: return static_cast<double>(v.value_s64.value);
+        case SCS_VALUE_TYPE_float: return v.value_float.value;
+        case SCS_VALUE_TYPE_double: return v.value_double.value;
+        default: return 0.0;
+    }
+}
+
 SCSAPI_VOID OnConfiguration(const scs_event_t, const void* const info, const scs_context_t) {
     const auto* c = static_cast<const scs_telemetry_configuration_t*>(info);
-    if (c && c->id && strcmp(c->id, "truck") == 0 && g_truckTick.load() == 0) g_truckTick = GetTickCount64();
+    if (!c || !c->id) return;
+    if (strcmp(c->id, "truck") == 0) {
+        if (g_truckTick.load() == 0) g_truckTick = GetTickCount64();
+        std::string ident;
+        for (const scs_named_value_t* a = c->attributes; a && a->name; ++a) {
+            if (a->value.type == SCS_VALUE_TYPE_string && a->value.value_string.value &&
+                (strcmp(a->name, "brand_id") == 0 || strcmp(a->name, "id") == 0 || strcmp(a->name, "name") == 0))
+                ident += std::string(a->value.value_string.value) + " ";
+        }
+        if (!ident.empty()) ep::PaxSetVehicle(ident);
+    } else if (strcmp(c->id, "job") == 0) {
+        std::string src, dst;
+        float km = 0.0f;
+        for (const scs_named_value_t* a = c->attributes; a && a->name; ++a) {
+            if (strcmp(a->name, "source.city") == 0 && a->value.type == SCS_VALUE_TYPE_string && a->value.value_string.value)
+                src = a->value.value_string.value;
+            else if (strcmp(a->name, "destination.city") == 0 && a->value.type == SCS_VALUE_TYPE_string && a->value.value_string.value)
+                dst = a->value.value_string.value;
+            else if (strcmp(a->name, "planned_distance.km") == 0)
+                km = static_cast<float>(NumberOf(a->value));
+        }
+        ep::PaxSetJob(src, dst, km);  // empty attribute set = no job
+    }
 }
 
 }  // namespace
@@ -270,6 +309,8 @@ extern "C" SCSAPI_RESULT scs_telemetry_init(const scs_u32_t version,
                                     SCS_TELEMETRY_CHANNEL_FLAG_none, OnNavDistance, nullptr);
             p->register_for_channel(SCS_TELEMETRY_TRUCK_CHANNEL_navigation_speed_limit, SCS_U32_NIL, SCS_VALUE_TYPE_float,
                                     SCS_TELEMETRY_CHANNEL_FLAG_none, OnSpeedLimit, nullptr);
+            p->register_for_channel(SCS_TELEMETRY_CHANNEL_local_scale, SCS_U32_NIL, SCS_VALUE_TYPE_float,
+                                    SCS_TELEMETRY_CHANNEL_FLAG_none, OnTimeScale, nullptr);
         }
     } catch (...) {
         ep::Logf("exception during init");
