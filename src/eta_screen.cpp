@@ -71,7 +71,7 @@ Field g_fields[7] = {
     {"OFF", 20, 1996, 4, 4, true, RGB(0, 0, 0), RGB(0, 0, 0), 0, false, L"Segoe UI", FW_NORMAL, 5},
     {"PLATE", 12, 1996, 1040, 220, true, RGB(0, 0, 0), RGB(0, 0, 0), 0, false, L"Bahnschrift", FW_NORMAL, 6},
 };
-constexpr int kBootField = 4, kOffField = 5;
+constexpr int kBootField = 4;
 
 // Start-up animation: armed (overlay opaque black) while the screen is off - black off page or electrics off - and
 // started when a page with the boot placeholder is drawn after switching on.
@@ -601,11 +601,9 @@ void EtaUpload() {
     const ULONGLONG now = GetTickCount64();
     PaxTick(g_gameMinutes.load(), g_navSeconds.load(), g_navMeters.load());
     {
-        const ULONGLONG offSeen = g_fields[kOffField].lastBound.load(std::memory_order_relaxed);
         const ULONGLONG bootSeen = g_fields[kBootField].lastBound.load(std::memory_order_relaxed);
-        // bus switched off: overlay black (ready), bus switched on: animation, whatever page is showing
-        // a placeholder bound after `now` was read counts as just seen (no unsigned underflow)
-        auto recent = [now](ULONGLONG seen) { return seen != 0 && (seen >= now || now - seen < 400); };
+        // bus switched off: overlay black (ready), bus switched on: animation, whatever page is showing.
+        // Coming back from the black OFF page does not play it (only switching the vehicle on does).
         const int electric = g_electric.load();
         if (electric == 0) {
             g_bootArmed = true;
@@ -627,12 +625,6 @@ void EtaUpload() {
                 g_bootArmed = false;  // screen not drawn (other vehicle, outside view): give up, no black overlay left
                 g_electricOnAt = 0;
             }
-        }
-        if (recent(offSeen)) g_bootArmed = true;
-        if (g_bootArmed && electric != 0 && g_electricOnAt == 0 && bootSeen > offSeen && recent(bootSeen)) {
-            g_bootArmed = false;
-            g_bootStart = now;
-            Logf("BOOT screen switched on again: start-up animation");
         }
     }
     const float bootT = g_bootStart != 0 ? (now - g_bootStart) / 1000.0f : -1.0f;
