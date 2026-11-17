@@ -41,6 +41,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from gi.repository import Gio, GLib
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # yamnet_cls.py next to this file
+
 MPRIS_PREFIX = "org.mpris.MediaPlayer2."
 PLAYER_IFACE = "org.mpris.MediaPlayer2.Player"
 ROOT_IFACE = "org.mpris.MediaPlayer2"
@@ -54,6 +56,8 @@ RECORD_SECONDS = 12
 SONG_MAX_AGE = 240         # a recognised song is shown for at most this long without a new match
 GENRE_INTERVAL_NEW = 60    # stations with their own song titles: Shazam check for the genre until it's known...
 GENRE_INTERVAL = 300       # ...then every 5 minutes
+TALK_INTERVAL = 120        # once a station is known to be talk, check less often (music may come back)
+MODEL_DIR = os.environ.get("CNP_MODEL_DIR") or os.path.expanduser("~/.local/share/coach-mpris-bridge/model/yamnet-onnx-float")
 
 LOCAL_RADIO = (os.environ.get("LOCAL_RADIO_URL") or "http://127.0.0.1:8330").rstrip("/")
 LOCAL_RADIO_WEB = os.environ.get("LOCAL_RADIO_WEB") or ""  # web/ folder for station lists + logos (auto-detected)
@@ -167,6 +171,7 @@ def station_index():
     if _index is None:
         by_url, by_name_logo, by_name, countries = {}, {}, {}, {}
         for f in ("stations-europe.js", "stations-america.js"):
+            region = "america" if "america" in f else "europe"
             try:
                 src = open(os.path.join(WEB_DIR or "", "stations", f), encoding="utf-8").read()
             except OSError:
@@ -177,7 +182,7 @@ def station_index():
                 if m.group(1):
                     key = m.group(1)
                     continue
-                entry = (m.group(2), m.group(3), key)
+                entry = (m.group(2), m.group(3), key, region)
                 by_url.setdefault(m.group(4).rstrip("/"), entry)
                 by_name_logo.setdefault((m.group(2), m.group(3)), entry)
                 by_name.setdefault(m.group(2), entry)
@@ -197,6 +202,8 @@ def country_name(key, logo):
     countries = station_index()[3]
     if key in countries:
         return countries[key]
+    if key in REGION_NAMES:
+        return REGION_NAMES[key]
     folder = (logo or "").split("/")[2] if (logo or "").count("/") >= 3 else ""
     if folder in countries:
         return countries[folder]
@@ -205,7 +212,7 @@ def country_name(key, logo):
 
 
 def local_radio_station(stream_url):
-    """(name, logo path, country name) of the station Local Radio plays."""
+    """The station Local Radio plays: name, logo path, country key + English name, region (europe/america)."""
     by_url, by_name_logo, by_name, _ = station_index()
     name = logo = ""
     try:
@@ -217,7 +224,9 @@ def local_radio_station(stream_url):
     entry = by_name_logo.get((name, logo)) or (name and by_name.get(name)) or by_url.get((stream_url or "").rstrip("/"))
     if entry and not name:
         name, logo = entry[0], entry[1]
-    return name, logo, country_name(entry[2] if entry else "", logo)
+    key = entry[2] if entry else ""
+    return {"name": name, "logo": logo, "key": key, "country": country_name(key, logo),
+            "region": entry[3] if entry else ""}
 
 
 def local_radio_control(action):
@@ -227,6 +236,35 @@ def local_radio_control(action):
     except OSError as e:
         log(f"local radio {action}: {e}")
         return False
+
+
+# Station rules (station line = the second line while the station name shows).
+# Traffic stations (Vinci, Sanef 107.7, Autoroute Info, Rai Isoradio, Traffic Radio NL, France Bleu Haute Normandie,
+# tbn, Traffic FM...): songs are shown when there are any, and they are never treated as talk.
+TRAFFIC_RE = re.compile(r"vinci|autoroute|sanef|isoradio|\btraffic\b|\btrafic\b|verkehr|bleu haute.?normandie", re.I)
+TALK_NAME_RE = re.compile(r"\b(news|talk|info|nachrichten|nieuws|noticias|actualit\w*|inforadio|journal)\b", re.I)
+NOT_TALK_RE = re.compile(r"groot nieuws", re.I)   # "good news": a Christian music station
+# No "house"/"club": The House FM / House of Praise are Christian stations, Music Club / Kids Club aren't EDM either.
+EDM_NAME_RE = re.compile(r"\b(dance|edm|techno|trance|hardstyle|electro\w*)\b", re.I)
+PUBLIC_RADIO_RE = re.compile(r"npr|public radio|\bwnyc\b|\bkqed\b|\bopb\b", re.I)   # American listener-supported
+ESPN_RE = re.compile(r"\bespn\b", re.I)
+# Shazam files much religious audio (incl. Quran recitation and Jewish religious music) under "Christian & Gospel".
+# That genre is only used for stations that are Christian themselves; e.g. Quran stations (also spelled without
+# hamza, قران) and Kan Moreshet never read as Christian.
+CHRISTIAN_GENRE_RE = re.compile(r"christian|gospel", re.I)
+CHRISTIAN_STATION_RE = re.compile(r"christ|gospel|praise|church|catholic|faith|bible|worship|jesus|vatican|ewtn|"
+                                  r"groot nieuws|k-?love|\bair1\b", re.I)
+REGION_NAMES = {"gaza": "Gaza", "palestine": "Palestine", "westbank": "West Bank"}  # if not in Local Radio's data
+SPORTS_RE = re.compile(r"sport|\b5 live\b", re.I)
+EVENT_LINES = {"christmas": "The Official North Pole Station",            # World of Trucks event channels
+               "halloween": "The Official Station of Witches Brew"}
+EDM_GENRE_RE = re.compile(r"dance|electronic|house|techno|trance|edm|drum|dubstep|hardstyle|electro", re.I)
+NORTH_KOREA_LINE = "존경하는 동지께서 깊은 존경을 담아 전합니다."
+VINCI_TITLE, VINCI_LINE = "Vous n'êtes jamais à 3 chansons de Traffic.", "Vinci Autoroutes Radio."
+
+
+def is_north_korea(st):
+    return st["key"] == "koreadpr" or bool(re.search(r"평양|pyongyang", st["name"], re.I))
 
 
 SONG_RE = re.compile(r"^\s*(?P<artist>[^-–]+?)\s+[-–]\s+(?P<title>.+?)\s*$")
@@ -250,7 +288,8 @@ def split_song(text, station):
 
 
 class LocalRadioSong:
-    """Background worker: knows the song on the current Local Radio stream (ICY title or SongRec)."""
+    """Background worker for the current Local Radio station: the song (ICY title or SongRec) and what kind of
+    station it is (talk / EDM / music), learned from Shazam results and a YAMNet speech/music check."""
 
     def __init__(self):
         self.cv = threading.Condition()
@@ -260,11 +299,26 @@ class LocalRadioSong:
         self.active_until = 0.0
         self.icy = None          # (artist, title) or None
         self.rec = None          # (artist, title, cover_url, when)
-        self.genres = {}         # station -> {genre: count} from Shazam
+        self.prof = {}           # station -> {"genres": {}, "clips": [speech bools], "misses": n, "hits": n}
         self.last_icy = 0.0
         self.last_rec = 0.0
         self.warned = set()
+        self.model = self.load_model()
         threading.Thread(target=self.run, daemon=True).start()
+
+    @staticmethod
+    def load_model():
+        try:
+            import yamnet_cls
+            m = yamnet_cls.Yamnet(MODEL_DIR)
+            log(f"talk detection: YAMNet loaded from {MODEL_DIR}")
+            return m
+        except Exception as e:  # numpy / onnxruntime / model missing: talk only by name and Shazam misses
+            log(f"talk detection without YAMNet ({e.__class__.__name__}: {e})")
+            return None
+
+    def profile(self, station):
+        return self.prof.setdefault(station, {"genres": {}, "clips": [], "misses": 0, "hits": 0})
 
     def want(self, url, station, pid):
         with self.cv:
@@ -279,8 +333,24 @@ class LocalRadioSong:
     def genre(self, station):
         """Most common Shazam genre of the songs heard on this station, or ''."""
         with self.cv:
-            counts = self.genres.get(station) or {}
+            counts = dict(self.profile(station)["genres"])
+        if not CHRISTIAN_STATION_RE.search(station):
+            counts = {g: c for g, c in counts.items() if not CHRISTIAN_GENRE_RE.search(g)}
         return max(counts, key=counts.get) if counts else ""
+
+    def kind(self, station):
+        """'talk', 'edm' or 'music'."""
+        with self.cv:
+            p = self.profile(station)
+            clips, misses, hits = list(p["clips"][-4:]), p["misses"], p["hits"]
+        if not TRAFFIC_RE.search(station):
+            if misses >= 2 and clips and sum(clips) * 2 >= len(clips):
+                return "talk"   # Shazam keeps missing and it sounds like speech
+            if TALK_NAME_RE.search(station) and not NOT_TALK_RE.search(station) and not (hits and misses == 0):
+                return "talk"   # news/talk/info in the name, unless songs are being identified right now
+        if EDM_GENRE_RE.search(self.genre(station)) or EDM_NAME_RE.search(station):
+            return "edm"
+        return "music"
 
     def song(self):
         """(artist, title, cover_url or None, source) or None."""
@@ -308,26 +378,40 @@ class LocalRadioSong:
                         if song != self.icy:
                             log(f"stream title: {icy!r} -> {'song' if song else 'not a song'}")
                         self.icy = song
+            talk = self.kind(station) == "talk"
             with self.cv:
                 since = time.monotonic() - self.last_rec
-                if self.icy:  # the stream names the song; Shazam only to learn the station's genre
-                    need_rec = since > (GENRE_INTERVAL if self.genres.get(station) else GENRE_INTERVAL_NEW)
+                if self.icy and not talk:  # the stream names the song; Shazam only to learn the genre
+                    need_rec = since > (GENRE_INTERVAL if self.profile(station)["genres"] else GENRE_INTERVAL_NEW)
                 else:
-                    need_rec = since > RECOGNIZE_INTERVAL
+                    need_rec = since > (TALK_INTERVAL if talk else RECOGNIZE_INTERVAL)
                 need_rec = need_rec and url == self.url
             if need_rec:
                 with self.cv:
                     self.last_rec = time.monotonic()
-                found = self.recognize(pid)
+                found, speech = self.recognize(pid)
                 with self.cv:
-                    if found and url == self.url:
+                    if url != self.url:
+                        continue
+                    p = self.profile(station)
+                    if found:
                         artist, title, cover, genre = found
+                        p["hits"] += 1
+                        p["misses"] = 0
                         if not self.rec or self.rec[:2] != (artist, title):
                             log(f"songrec: {artist} - {title} [{genre or 'no genre'}]")
                             if genre:
-                                counts = self.genres.setdefault(station, {})
-                                counts[genre] = counts.get(genre, 0) + 1
+                                p["genres"][genre] = p["genres"].get(genre, 0) + 1
                         self.rec = (artist, title, cover, time.time())
+                    elif found is None and speech is not ...:
+                        p["misses"] += 1
+                        if speech is not None:
+                            p["clips"] = (p["clips"] + [speech])[-6:]
+                        log(f"songrec: no match ({p['misses']} in a row), "
+                            f"audio sounds like {'speech' if speech else 'music' if speech is False else '?'}")
+                kind = self.kind(station)
+                if kind != ("talk" if talk else kind):
+                    log(f"{station}: now treated as {kind}")
 
     @staticmethod
     def read_icy(url):
@@ -352,30 +436,49 @@ class LocalRadioSong:
         return m.group(1).strip() if m else ""
 
     def recognize(self, pid):
+        """(song or None, speech True/False/None). speech is ... (Ellipsis) when nothing could be recorded."""
         if not (shutil.which("songrec") and shutil.which("pw-record")):
             if "tools" not in self.warned:
                 self.warned.add("tools")
                 log("songrec/pw-record not installed - only stream titles are available")
-            return None
+            return None, ...
         target = browser_stream(pid)
         if not target:
-            return None
+            return None, ...
+        speech = None
         with tempfile.TemporaryDirectory(prefix="cnp-rec-") as d:
             wav = os.path.join(d, "a.wav")
             try:
+                # 16 kHz mono: what Shazam fingerprints use internally and what YAMNet expects.
                 subprocess.run(["timeout", str(RECORD_SECONDS), "pw-record", "--target", str(target),
-                                "--rate", "44100", "--channels", "2", wav],
+                                "--rate", "16000", "--channels", "1", "--format", "s16", wav],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=RECORD_SECONDS + 5)
+                if not os.path.exists(wav) or os.path.getsize(wav) < 16000:
+                    return None, ...
                 out = subprocess.run(["songrec", "recognize", "-j", wav], capture_output=True, text=True, timeout=30)
                 track = (json.loads(out.stdout or "{}").get("track") or {})
+                if not track.get("title") and self.model is not None:
+                    speech = self.speech(wav)
             except (subprocess.SubprocessError, ValueError, OSError) as e:
                 log(f"songrec failed: {e}")
-                return None
+                return None, ...
         if not track.get("title"):
-            return None
+            return None, speech
         cover = (track.get("images") or {}).get("coverarthq") or (track.get("images") or {}).get("coverart")
         genre = ((track.get("genres") or {}).get("primary") or "").strip()
-        return track.get("subtitle") or "", track["title"], cover, genre
+        return (track.get("subtitle") or "", track["title"], cover, genre), False
+
+    def speech(self, wav):
+        try:
+            import wave
+            import numpy as np
+            import yamnet_cls
+            with wave.open(wav, "rb") as w:
+                x = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
+            return yamnet_cls.is_speech(self.model, x)
+        except Exception as e:
+            log(f"yamnet: {e!r}")
+            return None
 
 
 def browser_stream(pid):
@@ -401,8 +504,31 @@ lr_song = LocalRadioSong()
 
 # --------------------------------------------------------------------------- covers
 
+IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF8", b"RIFF")  # PNG, JPEG, GIF, WebP (RIFF....WEBP)
+
+
+def is_image(data):
+    return bool(data) and (data.startswith(IMAGE_MAGIC[:3]) or (data[:4] == b"RIFF" and data[8:12] == b"WEBP"))
+
+
+def allowed_file(path):
+    """Covers are only read from places where players and browsers put artwork, never from anywhere else."""
+    real = os.path.realpath(path)
+    roots = [tempfile.gettempdir(), "/tmp", "/var/tmp", os.environ.get("XDG_RUNTIME_DIR") or "",
+             os.path.expanduser("~/.cache"), os.path.expanduser("~/.var/app"), WEB_DIR or ""]
+    return any(r and (real == os.path.realpath(r) or real.startswith(os.path.realpath(r) + os.sep)) for r in roots)
+
+
+
 def load_image(src):
-    """Bytes of an image given as file:// / http(s):// / data: URL or a path inside the Local Radio web folder."""
+    """Image bytes for a file:// / http(s):// / data: URL or a path inside the Local Radio web folder.
+    Anything that isn't an image, or a file outside the artwork folders, is refused (MPRIS data comes from any
+    program on the desktop)."""
+    data = _load_image(src)
+    return data if is_image(data) else None
+
+
+def _load_image(src):
     if not src:
         return None
     try:
@@ -417,6 +543,9 @@ def load_image(src):
                 return r.read(MAX_COVER + 1)[:MAX_COVER]
         else:
             path = os.path.join(WEB_DIR or "", src)
+        if not allowed_file(path):
+            log(f"cover: refusing file outside the artwork folders: {path[:80]}")
+            return None
         if path.lower().endswith(".svg"):
             if not shutil.which("rsvg-convert"):
                 return None
@@ -433,6 +562,43 @@ def load_image(src):
 
 # --------------------------------------------------------------------------- snapshot
 
+def station_phase(st, kind, genre):
+    """(title, second line, cover) shown while the station name is on screen."""
+    name, logo = st["name"] or "Local Radio", st["logo"]
+    if is_north_korea(st):
+        return name, NORTH_KOREA_LINE, logo
+    for event, line in EVENT_LINES.items():
+        if event in (st["key"] or "").lower():
+            return name, line, logo
+    if re.search(r"vinci", name, re.I):
+        return VINCI_TITLE, VINCI_LINE, logo
+    if st["region"] == "america" and PUBLIC_RADIO_RE.search(name):
+        return name, "Your listener supported radio", logo
+    if ESPN_RE.search(name):
+        return name, "The Worldwide Leader in Sports", logo   # ESPN's official slogan
+    if SPORTS_RE.search(name):
+        return name, "Your home of sports", logo
+    if kind == "talk":
+        return name, "Your trusted news and talk station", logo
+    if kind == "edm":
+        return name, "The Station with Real DJs", logo
+    best = f"best {genre} station" if genre else "best station"
+    country = st["country"]
+    possessive = country + ("'" if country.endswith("s") else "'s")  # Netherlands' / Iceland's
+    return name, f"{possessive} {best}" if country else best[0].upper() + best[1:], logo
+
+
+def song_phase(kind, song):
+    """(artist, title, cover_url) for the song half of the rotation, or None to show only the station."""
+    if kind == "talk":
+        return None                                       # talk shows: no song info
+    if song:
+        return song[0], song[1], song[2]
+    if kind == "edm":
+        return "Likely DJ mix", "No song identified", None
+    return None                                           # nothing identified: no song info
+
+
 def snapshot(filter_text):
     name, p = pick(filter_text)
     with lock:
@@ -446,21 +612,17 @@ def snapshot(filter_text):
 
     if is_local_radio(p):
         stream = str(md.get("kde:mediaSrc") or "")
-        station, logo, country = local_radio_station(stream)
+        st = local_radio_station(stream)
+        station, logo = st["name"], st["logo"]
         if playing and (stream or station):
             # Without Plasma's browser integration there's no stream address: key on the station, SongRec only.
             lr_song.want(stream or f"station:{station}", station, md.get("kde:pid"))
-        song = lr_song.song() if playing else None
-        show_song = song and int(time.time() // ROTATE_SECONDS) % 2 == 0
-        if show_song:
-            artist, title, cover_url, _ = song
+        kind = lr_song.kind(station)
+        title, artist, cover = station_phase(st, kind, lr_song.genre(station))
+        song = song_phase(kind, lr_song.song() if playing else None)
+        if song and int(time.time() // ROTATE_SECONDS) % 2 == 0:
+            artist, title, cover_url = song
             cover = cover_url or logo
-        else:
-            genre = lr_song.genre(station)
-            best = f"best {genre} station" if genre else "best station"
-            possessive = country + ("'" if country.endswith("s") else "'s")  # Netherlands' / Iceland's
-            artist = f"{possessive} {best}" if country else best[0].upper() + best[1:]
-            title, cover = station or "Local Radio", logo
         lines = {"app": "ETS2 Local Radio", "title": title, "artist": artist, "album": station,
                  "duration": "0", "position": "0"}
     else:
@@ -537,9 +699,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def request_ok(self):
+        """Only the plugin may talk to us: right Host (no DNS rebinding) and no browser headers (no cross-site
+        requests from web pages). WinHTTP in the game sends neither Origin nor Sec-Fetch-*."""
+        host = (self.headers.get("Host") or "").lower()
+        port = str(self.server.server_address[1])
+        if host not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            return False
+        return not (self.headers.get("Origin") or self.headers.get("Sec-Fetch-Site") or self.headers.get("Sec-Fetch-Mode"))
+
     def do_GET(self):
         u = urllib.parse.urlsplit(self.path)
         q = urllib.parse.parse_qs(u.query)
+        if not self.request_ok():
+            return self.send(403)
         try:
             if u.path == "/nowplaying":
                 return self.send(200, snapshot(q.get("filter", [""])[0]).encode())

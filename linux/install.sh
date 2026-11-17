@@ -62,12 +62,33 @@ cp "$DLL" "$P/CoachNowPlaying.dll"
 echo "==> plugin: $P/CoachNowPlaying.dll"
 [[ -d "$P/CoachNowPlaying_piper" ]] || echo "    note: copy CoachNowPlaying_piper/ from the release ZIP too if you want the voice announcements"
 
-# 3. The bridge as a user service (starts at login).
+# 3. Talk detection (optional): YAMNet speech/music model in a private Python environment.
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/$NAME"
+PY=python3
+if [[ "${NO_YAMNET:-0}" != 1 ]]; then
+  echo "==> talk detection: Python venv with onnxruntime + YAMNet (set NO_YAMNET=1 to skip)"
+  if [[ ! -x "$DATA/venv/bin/python" ]]; then
+    python3 -m venv --system-site-packages "$DATA/venv"
+  fi
+  if "$DATA/venv/bin/pip" install -q onnxruntime numpy >/dev/null 2>&1; then
+    PY="$DATA/venv/bin/python"
+    if [[ ! -f "$DATA/model/yamnet-onnx-float/yamnet.onnx" ]]; then
+      mkdir -p "$DATA/model"
+      curl -fsSL -o "$DATA/model/y.zip" \
+        https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models/models/yamnet/releases/v0.66.0/yamnet-onnx-float.zip \
+        && (cd "$DATA/model" && unzip -o -q y.zip && rm -f y.zip) || echo "    (model download failed - talk detection by name only)"
+    fi
+  else
+    echo "    (pip install failed - talk detection by name and Shazam misses only)"
+  fi
+fi
+
+# 4. The bridge as a user service (starts at login).
 mkdir -p "$UNIT_DIR"
 chmod +x "$HERE/$NAME.py"
-sed "s|@BRIDGE@|$HERE/$NAME.py|" "$HERE/$NAME.service" > "$UNIT_DIR/$NAME.service"
+sed -e "s|@BRIDGE@|$HERE/$NAME.py|" -e "s|/usr/bin/env python3|$PY|" "$HERE/$NAME.service" > "$UNIT_DIR/$NAME.service"
 systemctl --user daemon-reload
-systemctl --user enable --now "$NAME.service"
+systemctl --user enable "$NAME.service" >/dev/null 2>&1; systemctl --user restart "$NAME.service"
 echo "==> bridge service running: systemctl --user status $NAME"
 
 have songrec && have pw-record || echo "    tip: install songrec (and PipeWire's pw-record) to identify songs on stations that don't send them"

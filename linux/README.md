@@ -22,13 +22,41 @@ helper, **`coach-mpris-bridge`**, which reads the "now playing" info of your Lin
   The screen **alternates every 15 s** between the song (with its album cover) and the **station name** (with the
   station logo). **Next/Previous** on the screen switch the Local Radio station, and **Play/Pause** pauses it.
 
+### What the screen shows for Local Radio
+
+The second line while the **station name** shows (first rule that matches):
+
+| Station | Line |
+|---|---|
+| North Korea (평양FM방송) | 존경하는 동지께서 깊은 존경을 담아 전합니다. |
+| World of Trucks Christmas / Halloween channels | The Official North Pole Station / The Official Station of Witches Brew |
+| Radio Vinci Autoroutes | *Vous n'êtes jamais à 3 chansons de Traffic.* · Vinci Autoroutes Radio. |
+| American public radio (NPR, "Public Radio", WNYC, KQED, OPB) | Your listener supported radio |
+| ESPN | The Worldwide Leader in Sports |
+| Other sports stations | Your home of sports |
+| Talk / news (detected) | Your trusted news and talk station |
+| EDM (Shazam genre or name) | The Station with Real DJs |
+| Everything else | *Iceland's* best *Pop* station (region from Local Radio, genre from Shazam) |
+
+The **song** half: the identified song (stream title or Shazam). Nothing for talk shows or when nothing could be
+identified, except on EDM stations: *No song identified · Likely DJ mix*.
+
+- **Talk detection:** Shazam misses at least twice in a row and [YAMNet](https://huggingface.co/qualcomm/YamNet) hears
+  mostly speech in the recent clips (or the name says news/talk/info, until songs get identified). Traffic stations
+  (Vinci, Sanef 107.7, Autoroute Info, Rai Isoradio, Traffic FM, ...) are never treated as talk; their songs are shown.
+- **Genres:** Shazam's "Christian & Gospel" is only used for Christian stations, so Quran stations (e.g. Ramallah,
+  ERTU, Diyanet) and Jewish religious stations (Kan Moreshet) never read as Christian.
+- **Regions:** each station is labelled with its own Local Radio region, e.g. Israel and West Bank stations each
+  under their own name; Gaza / Palestine are named properly if such regions are added.
+
 The rest of the plugin (arrival clock, speed limit, passenger TV, announcements, number plate, start-up animation) is
 unchanged upstream code.
 
 ## Install
 
 Needs: ETS2 running under Proton, Python 3 with PyGObject (preinstalled on KDE/GNOME), and optionally `songrec` and
-PipeWire's `pw-record` for song recognition.
+PipeWire's `pw-record` for song recognition. For talk detection the installer creates a small Python environment with ONNX
+Runtime and downloads the YAMNet model (14 MB; skip with `NO_YAMNET=1`).
 
 ```bash
 sudo pacman -S songrec          # Debian/Ubuntu/Fedora: see SongRec's README, or the Flatpak re.fossplant.songrec
