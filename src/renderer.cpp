@@ -707,6 +707,14 @@ void Renderer::Frame(double t) {
     bool buttons = false;
     if (radio.active) DrawRadio(radio, t);
     else if (holdRadio) DrawRadio(lastRadio_, t);
+#ifndef _MSC_VER
+    // Linux build: the in-game radio wins; otherwise whatever the system plays (Local Radio, Spotify, ...), drawn
+    // with upstream's own media page from 0.3.0. Windows builds stay radio-only like upstream.
+    else if (const MediaSnapshot media = MediaGetSnapshot(); media.hasSession && media.playing && !media.title.empty()) {
+        DrawMedia(media, t);
+        buttons = true;
+    }
+#endif
     else DrawIdle(t);  // radio only, no Spotify/media players
     TouchSetButtonsVisible(buttons);
     DrawTouchCursor();

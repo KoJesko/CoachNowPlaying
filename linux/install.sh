@@ -58,7 +58,8 @@ mkdir -p "$P"
 if [[ -f "$P/CoachNowPlaying.dll" ]] && ! cmp -s "$DLL" "$P/CoachNowPlaying.dll"; then
   cp -p "$P/CoachNowPlaying.dll" "$P/CoachNowPlaying.dll.bak-$(date +%Y%m%d-%H%M%S)"
 fi
-cp "$DLL" "$P/CoachNowPlaying.dll"
+# Atomic swap: a running game keeps its loaded copy (overwriting a loaded DLL in place can crash it).
+cp "$DLL" "$P/.CoachNowPlaying.dll.new" && mv -f "$P/.CoachNowPlaying.dll.new" "$P/CoachNowPlaying.dll"
 echo "==> plugin: $P/CoachNowPlaying.dll"
 [[ -d "$P/CoachNowPlaying_piper" ]] || echo "    note: copy CoachNowPlaying_piper/ from the release ZIP too if you want the voice announcements"
 

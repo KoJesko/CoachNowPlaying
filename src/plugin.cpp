@@ -307,6 +307,10 @@ extern "C" SCSAPI_RESULT scs_telemetry_init(const scs_u32_t version,
         ep::CoverLookupStart();
         ep::ExtraSourcesStart();
         ep::StationLogoStart();
+#ifndef _MSC_VER
+        // Linux build: system "now playing" (coach-mpris-bridge) when the in-game radio is off.
+        ep::MediaStart();
+#endif
         ep::RendererStart();
         ep::Logf("init done: net=%d engine=%d d3d11=%d", net, engine, gfx);
         GameLog(SCS_LOG_TYPE_message, "[CoachNowPlaying] started, see Documents\\...\\CoachNowPlaying\\diag.log");
@@ -340,6 +344,9 @@ extern "C" SCSAPI_VOID scs_telemetry_shutdown(void) {
     ep::D3D11HooksDisable();
     ep::EtaStop();
     ep::RendererStop();
+#ifndef _MSC_VER
+    ep::MediaStop();
+#endif
     ep::ExtraSourcesStop();
     ep::StationLogoStop();
     ep::CoverLookupStop();

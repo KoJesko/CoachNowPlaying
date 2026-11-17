@@ -5,6 +5,7 @@
 
 #include "cover_lookup.h"
 #include "log.h"
+#include "media.h"
 #include "passenger.h"
 #include "radio_tracker.h"
 #include "settings.h"
@@ -299,6 +300,18 @@ NowInfo GetNow() {
             if (l.state == LogoState::Found) n.picture = l.image;
         }
     }
+#ifndef _MSC_VER
+    else {  // Linux build: system "now playing" while the in-game radio is off
+        const MediaSnapshot m = MediaGetSnapshot();
+        if (m.hasSession && m.playing && !m.title.empty()) {
+            n.visible = true;
+            n.title = ToWide(m.title);
+            n.sub = ToWide(m.artist);
+            if (!m.album.empty() && m.album != m.title) n.sub += (n.sub.empty() ? L"" : L"  \u00b7  ") + ToWide(m.album);
+            n.picture = m.cover;
+        }
+    }
+#endif
     wchar_t ptr[32];
     swprintf(ptr, 32, L"|%p", static_cast<const void*>(n.picture.get()));
     n.key = (n.visible ? L"1|" : L"0|") + n.title + L"|" + n.sub + ptr;
