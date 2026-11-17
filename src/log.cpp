@@ -1,5 +1,7 @@
 #include "log.h"
 
+#include <share.h>
+
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>

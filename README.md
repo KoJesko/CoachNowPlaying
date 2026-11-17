@@ -1,5 +1,7 @@
 # CoachNowPlaying
 
+> **🐧 Linux (Proton):** this fork's `linux` branch adds a Linux build. The music page shows whatever your system plays, including song + station on [ETS2/ATS Local Radio](https://github.com/Koenvh1/ets2-local-radio) ([Linux port](https://github.com/KoJesko/ets2-local-radio)), with songs identified by Shazam when the station doesn't send them. See **[linux/README.md](linux/README.md)**.
+
 Optional ETS2 plugin for the Steam Workshop mod **"CarPlay-Style Infotainment for Coaches"** (Coaches DLC).
 *English below · Deutsch weiter unten*
 

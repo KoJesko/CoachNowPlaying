@@ -43,7 +43,7 @@ void LoadSettings(const std::wstring& dir) {
                 "\r\n"
                 "[media]\r\n"
                 "; Only show media from apps whose name contains this text. Empty = any player.\r\n"
-                "app_filter=spotify\r\n"
+                "app_filter=" CNP_DEFAULT_APP_FILTER "\r\n"
                 "\r\n"
                 "[radio]\r\n"
                 "; 1 = look up song covers and station logos online (iTunes, Deezer, radio-browser.info). 0 = off.\r\n"
@@ -72,7 +72,7 @@ void LoadSettings(const std::wstring& dir) {
     // Upgrades from older builds.
     EnsureKey(ini, L"screen", L"flip_vertical", L"0");
     EnsureKey(ini, L"screen", L"auto_fit", L"0");
-    EnsureKey(ini, L"media", L"app_filter", L"spotify");
+    EnsureKey(ini, L"media", L"app_filter", CNP_DEFAULT_APP_FILTER_W);
     EnsureKey(ini, L"radio", L"cover_lookup", L"1");
     EnsureKey(ini, L"radio", L"extra_sources", L"1");
     EnsureKey(ini, L"touch", L"enabled", L"1");
@@ -105,7 +105,7 @@ void LoadSettings(const std::wstring& dir) {
     }
 
     wchar_t filter[128] = {};
-    GetPrivateProfileStringW(L"media", L"app_filter", L"spotify", filter, 128, ini.c_str());
+    GetPrivateProfileStringW(L"media", L"app_filter", CNP_DEFAULT_APP_FILTER_W, filter, 128, ini.c_str());
     int n = WideCharToMultiByte(CP_UTF8, 0, filter, -1, nullptr, 0, nullptr, nullptr);
     std::string f(static_cast<size_t>(n > 0 ? n - 1 : 0), '\0');
     if (n > 1) WideCharToMultiByte(CP_UTF8, 0, filter, -1, f.data(), n, nullptr, nullptr);

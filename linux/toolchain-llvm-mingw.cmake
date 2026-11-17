@@ -1,0 +1,15 @@
+# Cross-compile the Windows plugin DLL on Linux with llvm-mingw (https://github.com/mstorsjo/llvm-mingw).
+# LLVM_MINGW defaults to ~/.local/opt/llvm-mingw-*; override with -DLLVM_MINGW=/path.
+set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+if(NOT LLVM_MINGW)
+    file(GLOB _cands "$ENV{HOME}/.local/opt/llvm-mingw-*")
+    list(GET _cands 0 LLVM_MINGW)
+endif()
+set(CMAKE_C_COMPILER   "${LLVM_MINGW}/bin/x86_64-w64-mingw32-clang")
+set(CMAKE_CXX_COMPILER "${LLVM_MINGW}/bin/x86_64-w64-mingw32-clang++")
+set(CMAKE_RC_COMPILER  "${LLVM_MINGW}/bin/x86_64-w64-mingw32-windres")
+set(CMAKE_FIND_ROOT_PATH "${LLVM_MINGW}/x86_64-w64-mingw32")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)

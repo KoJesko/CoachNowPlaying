@@ -1,0 +1,12 @@
+[Unit]
+Description=CoachNowPlaying now-playing bridge (MPRIS / ETS2 Local Radio -> ETS2 under Proton)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env python3 @BRIDGE@
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

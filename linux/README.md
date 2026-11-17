@@ -1,0 +1,85 @@
+# CoachNowPlaying for Linux (ETS2 under Proton)
+
+A Linux build of [CoachNowPlaying](https://github.com/videtess/CoachNowPlaying) by videtess, the plugin for the
+**"CarPlay-Style Infotainment for Coaches"** mod. Everything works like on Windows. The difference is the music page:
+it shows **whatever your system is playing**, including songs on **[ETS2/ATS Local Radio](https://github.com/Koenvh1/ets2-local-radio)**.
+
+## Why a Linux build
+
+On Windows, the music page reads the Windows media controls. Wine/Proton doesn't have those, so under Linux the page
+stayed empty. This build swaps that one part (`src/media_mpris.cpp` instead of `src/media.cpp`) for a small native
+helper, **`coach-mpris-bridge`**, which reads the "now playing" info of your Linux desktop (MPRIS):
+
+- **Any player:** Spotify, VLC, a YouTube tab, … The title, artist, cover, progress bar and the play/pause/next/previous
+  buttons all work.
+- **ETS2/ATS Local Radio:** works with the [Linux version of Local Radio](https://github.com/KoJesko/ets2-local-radio)
+  (a port of [Koenvh's Local Radio](https://github.com/Koenvh1/ets2-local-radio)). Local Radio only knows the station,
+  not the song, so the bridge finds the song itself:
+  1. If the station sends the song in its stream ("Artist - Title"), that's used. It's exact and instant.
+  2. If it doesn't, the bridge records about 12 s of **the browser's audio only** (not the game) and identifies the song
+     with [SongRec](https://github.com/marin-m/SongRec) (Shazam). This repeats every 30 s while needed.
+
+  The screen **alternates every 15 s** between the song (with its album cover) and the **station name** (with the
+  station logo). **Next/Previous** on the screen switch the Local Radio station, and **Play/Pause** pauses it.
+
+The rest of the plugin (arrival clock, speed limit, passenger TV, announcements, number plate, start-up animation) is
+unchanged upstream code.
+
+## Install
+
+Needs: ETS2 running under Proton, Python 3 with PyGObject (preinstalled on KDE/GNOME), and optionally `songrec` and
+PipeWire's `pw-record` for song recognition.
+
+```bash
+sudo pacman -S songrec          # Debian/Ubuntu/Fedora: see SongRec's README, or the Flatpak re.fossplant.songrec
+git clone -b linux https://github.com/KoJesko/CoachNowPlaying.git
+cd CoachNowPlaying
+./linux/install.sh              # --game-dir "<path>/Euro Truck Simulator 2" if it's not in ~/.local/share/Steam
+```
+
+The installer:
+1. **Builds the DLL** if [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) is in `~/.local/opt/`. Otherwise, put
+   `CoachNowPlaying.dll` from the Linux release into `linux/` first.
+2. **Copies it** into `bin/win_x64/plugins/`, backing up an existing Windows build.
+3. **Starts the bridge** as a systemd user service at login.
+
+Copy the `CoachNowPlaying_piper` folder from the upstream release ZIP too if you want the voice announcements.
+
+For Local Radio, use the Linux port linked above (it tells the bridge which station plays). With **Plasma browser
+integration** (KDE) the bridge also sees the stream address and can use the station's own song titles; without it,
+songs are identified with SongRec only.
+
+## Settings
+
+The INI is the same as on Windows (`Documents/Euro Truck Simulator 2/CoachNowPlaying/CoachNowPlaying.ini`):
+
+- `[media] app_filter=` is empty by default in this build (= any player). Put e.g. `spotify` there to show only Spotify.
+  Local Radio is always shown.
+- Bridge port: `CNP_BRIDGE_PORT` (default 8332), set for both the game and the service.
+- Local Radio server: `LOCAL_RADIO_URL` (default `http://127.0.0.1:8330`).
+
+## Troubleshooting
+
+- `diag.log` (next to the INI) shows `MEDIA bridge not reachable` → `systemctl --user status coach-mpris-bridge`.
+- To see what the bridge sees: `curl http://127.0.0.1:8332/nowplaying` and `journalctl --user -u coach-mpris-bridge -f`.
+
+## Building by hand
+
+```bash
+cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=linux/toolchain-llvm-mingw.cmake
+cmake --build build-linux
+```
+
+The Windows (MSVC) build is unchanged. `build.bat` still produces the original SMTC version.
+
+## Roadmap
+
+- **Truck version:** the same now-playing source (system audio + Local Radio) for trucks, not just coaches.
+
+## Credits
+
+[CoachNowPlaying](https://github.com/videtess/CoachNowPlaying) by videtess, based on
+[EtsNowPlaying](https://github.com/jxhnch/EtsNowPlaying) by jxhnch (MIT). Local Radio:
+[Koenvh1/ets2-local-radio](https://github.com/Koenvh1/ets2-local-radio) (MPL-2.0); Linux port
+[KoJesko/ets2-local-radio](https://github.com/KoJesko/ets2-local-radio). Song recognition:
+[SongRec](https://github.com/marin-m/SongRec) (GPL-3.0, used as a separate program).

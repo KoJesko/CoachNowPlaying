@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -87,7 +88,7 @@ void StationDb::SplitUrl(const std::string& urlIn, std::string& hostPort, std::s
 
 bool StationDb::Load(const std::wstring& file) {
     stations_.clear();
-    std::ifstream in(file, std::ios::binary);
+    std::ifstream in(std::filesystem::path(file), std::ios::binary);  // portable: MSVC-only wstring overload otherwise
     if (!in) return false;
 
     std::string line;
