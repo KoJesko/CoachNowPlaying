@@ -2,3 +2,5 @@ build/
 bin/
 *.zip
 build-linux/
+__pycache__/
+*.pyc
