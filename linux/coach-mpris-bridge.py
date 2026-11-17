@@ -165,11 +165,12 @@ _index = None
 
 
 def station_index():
-    """Station lists of Local Radio: stream url / (name, logo) / name -> (name, logo, country key), plus the
-    English names of the country keys (cities files' country_properties)."""
+    """Station lists of Local Radio: stream url / (name, logo) / name -> ALL matching entries (name, logo, country key,
+    europe|america), the English names of the country keys, and city coordinates per country key.
+    Many stations share a name, logo or stream across regions (KISS FM: 7 regions), so callers pick by position."""
     global _index
     if _index is None:
-        by_url, by_name_logo, by_name, countries = {}, {}, {}, {}
+        by_url, by_name_logo, by_name, countries, cities = {}, {}, {}, {}, {}
         for f in ("stations-europe.js", "stations-america.js"):
             region = "america" if "america" in f else "europe"
             try:
@@ -183,9 +184,9 @@ def station_index():
                     key = m.group(1)
                     continue
                 entry = (m.group(2), m.group(3), key, region)
-                by_url.setdefault(m.group(4).rstrip("/"), entry)
-                by_name_logo.setdefault((m.group(2), m.group(3)), entry)
-                by_name.setdefault(m.group(2), entry)
+                by_url.setdefault(m.group(4).rstrip("/"), []).append(entry)
+                by_name_logo.setdefault((m.group(2), m.group(3)), []).append(entry)
+                by_name.setdefault(m.group(2), []).append(entry)
         for f in ("cities-ets2.js", "cities-ats.js"):
             try:
                 src = open(os.path.join(WEB_DIR or "", "cities", f), encoding="utf-8").read()
@@ -194,8 +195,55 @@ def station_index():
             props = src[src.find("country_properties"):]
             for k, name in re.findall(r'"([^"]+)":\s*\{[^{}]*?name_english:\s*"([^"]*)"', props):
                 countries.setdefault(k, re.sub(r"\s*\[.*?\]\s*$", "", name).strip())
-        _index = (by_url, by_name_logo, by_name, countries)
+            for k, x, z in re.findall(r'"country":\s*"([^"]+)",\s*"x":\s*"?(-?[\d.]+)"?,\s*"y":\s*"?[-\d.]*"?,\s*'
+                                      r'"z":\s*"?(-?[\d.]+)"?', src):
+                cities.setdefault(k.lower(), []).append((float(x), float(z)))
+        _index = (by_url, by_name_logo, by_name, countries, cities)
     return _index
+
+
+_pos_cache = {"at": 0.0, "pos": None, "game": ""}
+
+
+def truck_position():
+    """(x, z) of the truck from Local Radio's /api/ (cached 2 s), or None while not driving."""
+    if time.monotonic() - _pos_cache["at"] > 2:
+        _pos_cache["at"] = time.monotonic()
+        try:
+            with urllib.request.urlopen(LOCAL_RADIO + "/api/", timeout=1) as r:
+                d = json.load(r)
+            p = d["TruckValues"]["Positioning"]["HeadPositionInWorldSpace"]
+            _pos_cache["pos"] = (p["X"], p["Z"]) if d.get("SdkActive") and (p["X"] or p["Z"]) else None
+            _pos_cache["game"] = {"Ets2": "europe", "Ats": "america"}.get(d.get("Game"), _pos_cache["game"])
+        except (OSError, ValueError, KeyError, TypeError):
+            _pos_cache["pos"] = None
+    return _pos_cache["pos"], _pos_cache["game"]
+
+
+def pick_entry(entries):
+    """The one of several same-named stations that is in the region where the truck is: the candidate whose
+    nearest city is closest. Without a position: the current game's map (ETS2 = europe, ATS = america), real
+    regions before the World of Trucks event channels."""
+    entries = list(dict.fromkeys(entries or []))
+    if len(entries) <= 1:
+        return entries[0] if entries else None
+    cities = station_index()[4]
+    pos, game = truck_position()
+
+    def score(e):
+        event = e[2].lower() in EVENT_LINES
+        dist = float("inf")
+        if pos:
+            for x, z in cities.get(e[2].lower(), ()):
+                dist = min(dist, (x - pos[0]) ** 2 + (z - pos[1]) ** 2)
+        return (dist, e[3] != game if game else False, event)
+    return min(entries, key=score)
+
+
+def normalize_logo(logo):
+    """The page reports logos with its URL prefix (https://localradio.koenvh.nl/stations/...): keep stations/..."""
+    i = (logo or "").find("stations/")
+    return logo[i:] if i > 0 else (logo or "")
 
 
 def country_name(key, logo):
@@ -213,20 +261,24 @@ def country_name(key, logo):
 
 def local_radio_station(stream_url):
     """The station Local Radio plays: name, logo path, country key + English name, region (europe/america)."""
-    by_url, by_name_logo, by_name, _ = station_index()
+    by_url, by_name_logo, by_name, _, _ = station_index()
     name = logo = ""
     try:
         with urllib.request.urlopen(LOCAL_RADIO + "/nowplaying/", timeout=1) as r:
             d = json.load(r)
-        name, logo = d.get("station") or "", d.get("logo") or ""
+        name, logo = d.get("station") or "", normalize_logo(d.get("logo") or "")
     except (OSError, ValueError):
         pass
-    entry = by_name_logo.get((name, logo)) or (name and by_name.get(name)) or by_url.get((stream_url or "").rstrip("/"))
+    stream = (stream_url or "").rstrip("/")
+    # Most specific first; when several regions still fit, the truck's position decides (pick_entry).
+    entry = (pick_entry(by_name_logo.get((name, logo))) or
+             pick_entry([e for e in by_url.get(stream, []) if not name or e[0] == name]) or
+             pick_entry(by_name.get(name)) or pick_entry(by_url.get(stream)))
     if entry and not name:
         name, logo = entry[0], entry[1]
     key = entry[2] if entry else ""
-    return {"name": name, "logo": logo, "key": key, "country": country_name(key, logo),
-            "region": entry[3] if entry else ""}
+    return {"name": name, "logo": logo or (entry[1] if entry else ""), "key": key,
+            "country": country_name(key, logo), "region": entry[3] if entry else ""}
 
 
 def local_radio_control(action):
