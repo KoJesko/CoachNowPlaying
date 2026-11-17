@@ -36,6 +36,8 @@ add_library(CoachNowPlaying SHARED
     src/renderer.cpp
     src/eta_screen.cpp
     src/passenger.cpp
+    src/announce_text.cpp
+    src/tv_text.cpp
     src/boot_anim.cpp
     src/plate.cpp
     src/exports.def)

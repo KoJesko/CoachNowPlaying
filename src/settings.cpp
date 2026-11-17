@@ -63,7 +63,8 @@ void LoadSettings(const std::wstring& dir) {
                 "minutes=5\r\n"
                 "; 0..100\r\n"
                 "volume=80\r\n"
-                "; auto = German voice if Windows has one, else English. en = always English.\r\n"
+                "; auto = the language of the game. Or language codes (de, en, fr, pl, pt_br, ...), several with commas:\r\n"
+                "; auto,en = first in the game's language, then in English. Voices: CoachNowPlaying_piper\\voice, else Windows.\r\n"
                 "language=auto\r\n";
             fwrite(text, 1, sizeof(text) - 1, f);
             fclose(f);
@@ -99,8 +100,8 @@ void LoadSettings(const std::wstring& dir) {
     g_settings.announceMinutes = std::max(1, static_cast<int>(GetPrivateProfileIntW(L"announce", L"minutes", 5, ini.c_str())));
     g_settings.announceVolume = static_cast<int>(GetPrivateProfileIntW(L"announce", L"volume", 80, ini.c_str()));
     {
-        wchar_t lang[16] = {};
-        GetPrivateProfileStringW(L"announce", L"language", L"auto", lang, 16, ini.c_str());
+        wchar_t lang[64] = {};
+        GetPrivateProfileStringW(L"announce", L"language", L"auto", lang, 64, ini.c_str());
         g_settings.announceLanguage = lang;
     }
 

@@ -1,5 +1,6 @@
 #pragma once
 #include "common.h"
+#include "tv_text.h"
 
 #include <string>
 #include <vector>
@@ -26,6 +27,9 @@ PaxView PaxGetView(uint32_t gameMinutes, bool haveTime, float navSeconds, float 
 // Draws the TV picture (top-down BGRA, w x h).
 std::vector<uint8_t> PaxDraw(UINT w, UINT h, const PaxView& v, uint32_t gameMinutes, bool haveTime, float navSeconds,
                              float navMeters);
+// Same in the given language (used by PaxDraw with the game's language, and by tools\\tv_preview).
+std::vector<uint8_t> PaxDrawText(UINT w, UINT h, const PaxView& v, uint32_t gameMinutes, bool haveTime, float navSeconds,
+                                 float navMeters, const TvText& tx);
 // Called every frame: starts the announcement when the time has come.
 void PaxTick(uint32_t gameMinutes, float navSeconds, float navMeters);
 
