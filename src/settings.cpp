@@ -73,6 +73,7 @@ void LoadSettings(const std::wstring& dir) {
     // Upgrades from older builds.
     EnsureKey(ini, L"screen", L"flip_vertical", L"0");
     EnsureKey(ini, L"screen", L"auto_fit", L"0");
+    EnsureKey(ini, L"screen", L"gps_takeover", L"0");
     EnsureKey(ini, L"media", L"app_filter", CNP_DEFAULT_APP_FILTER_W);
     EnsureKey(ini, L"radio", L"cover_lookup", L"1");
     EnsureKey(ini, L"radio", L"extra_sources", L"1");
@@ -95,6 +96,8 @@ void LoadSettings(const std::wstring& dir) {
     g_settings.extraSources = GetPrivateProfileIntW(L"radio", L"extra_sources", 1, ini.c_str()) != 0;
     g_settings.touch = GetPrivateProfileIntW(L"touch", L"enabled", 1, ini.c_str()) != 0;
     g_settings.textureFinder = GetPrivateProfileIntW(L"debug", L"texture_finder", 0, ini.c_str()) != 0;
+    g_settings.gpsTakeover = GetPrivateProfileIntW(L"screen", L"gps_takeover", 0, ini.c_str()) != 0;
+    g_settings.gpsTakeoverPick = static_cast<int>(GetPrivateProfileIntW(L"screen", L"gps_takeover_pick", 0, ini.c_str()));
     g_settings.autoFit = static_cast<int>(GetPrivateProfileIntW(L"screen", L"auto_fit", 1, ini.c_str()));
     g_settings.announce = GetPrivateProfileIntW(L"announce", L"enabled", 1, ini.c_str()) != 0;
     g_settings.announceMinutes = std::max(1, static_cast<int>(GetPrivateProfileIntW(L"announce", L"minutes", 5, ini.c_str())));

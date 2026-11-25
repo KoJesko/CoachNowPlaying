@@ -93,6 +93,23 @@ bool IsPlaceholder(const D3D11_TEXTURE2D_DESC* d) {
             d->Format == DXGI_FORMAT_BC3_TYPELESS);
 }
 
+bool IsSrgbFormat(DXGI_FORMAT f) {
+    return f == DXGI_FORMAT_BC3_UNORM_SRGB || f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+}
+
+// GPS takeover (no mod, e.g. TruckersMP): the game draws its cab screen into a 1024x1024 RGBA8 render target that is
+// also sampled (bind = shader resource | render target). Found with the texture finder on 2026-11-25: on a coach only
+// 2 of ~1750 bound textures look like this, so the user picks the right one with Ctrl+Shift+F10.
+// Idea credit: PrismTextureStreamer by Baldywaldy09 showed that a plugin can take over a cab screen on TruckersMP
+// (https://github.com/Baldywaldy09/PrismTextureStreamer). No code taken from it; this reuses the placeholder swap.
+bool IsGpsRenderTarget(const D3D11_TEXTURE2D_DESC* d) {
+    return d->Width == 1024 && d->Height == 1024 && d->ArraySize == 1 && d->MipLevels == 1 && d->SampleDesc.Count == 1 &&
+           d->Usage == D3D11_USAGE_DEFAULT && d->BindFlags == (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET) &&
+           d->CPUAccessFlags == 0 && d->MiscFlags == 0 &&
+           (d->Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || d->Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
+            d->Format == DXGI_FORMAT_R8G8B8A8_TYPELESS);
+}
+
 bool IsSwapSrv(ID3D11ShaderResourceView* s) {
     for (auto& slot : g_swap) {
         if (slot.load(std::memory_order_relaxed) == s) return true;
@@ -149,7 +166,7 @@ void OnPlaceholderCreated(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& d, ID3D
     g_ourTex = tex;
     g_placeholder = placeholder;
     g_placeholder->AddRef();
-    g_placeholderSrgb = d.Format == DXGI_FORMAT_BC3_UNORM_SRGB;
+    g_placeholderSrgb = IsSrgbFormat(d.Format);
     Logf("SCREEN our %ux%u texture created next to the game's placeholder %p (thread %lu)", nd.Width, nd.Height,
          static_cast<void*>(placeholder), GetCurrentThreadId());
     FitReset("new screen texture");  // a new truck / reload: measure the display again
@@ -161,7 +178,7 @@ void OnPlaceholderViewCreated(ID3D11Device* dev, ID3D11ShaderResourceView* gameV
                               const D3D11_SHADER_RESOURCE_VIEW_DESC* desc) {
     std::lock_guard<std::mutex> lock(g_screenMx);
     if (!g_ourTex) return;
-    bool srgb = desc ? desc->Format == DXGI_FORMAT_BC3_UNORM_SRGB : g_placeholderSrgb;
+    bool srgb = desc && desc->Format != DXGI_FORMAT_UNKNOWN ? IsSrgbFormat(desc->Format) : g_placeholderSrgb;
 
     D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
     vd.Format = srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -183,6 +200,108 @@ void OnPlaceholderViewCreated(ID3D11Device* dev, ID3D11ShaderResourceView* gameV
          srgb ? "sRGB" : "linear");
 }
 
+// ---- GPS takeover ---------------------------------------------------------------------------------------------------
+struct GpsCand {
+    ID3D11Texture2D* tex;  // one reference held by us
+    D3D11_TEXTURE2D_DESC desc;
+    std::vector<ID3D11ShaderResourceView*> views;  // the game's views of it (keys only, no reference)
+};
+std::vector<GpsCand> g_gps;  // under g_screenMx
+int g_gpsPick = 0;           // index into g_gps, -1 = off (stock screen)
+
+// Only we still hold it: the game released the screen (other truck, reload).
+bool OnlyWeHold(ID3D11Texture2D* t) {
+    t->AddRef();
+    return t->Release() == 1;
+}
+
+void ClearSwapSrvs() {
+    for (auto& slot : g_swap) slot.store(nullptr);
+}
+
+// Show our picture on candidate `pick` (or nobody for -1). Called without g_screenMx held.
+void GpsSelect(int pick) {
+    GpsCand cand{};
+    {
+        std::lock_guard<std::mutex> lock(g_screenMx);
+        g_gpsPick = pick;
+        ClearSwapSrvs();
+        if (pick < 0 || pick >= static_cast<int>(g_gps.size())) {
+            Logf("TAKEOVER off: the stock cab screen shows (%zu candidates known)", g_gps.size());
+            return;
+        }
+        cand = g_gps[static_cast<size_t>(pick)];
+        cand.tex->AddRef();
+    }
+    ID3D11Device* dev = nullptr;
+    cand.tex->GetDevice(&dev);
+    if (dev) {
+        OnPlaceholderCreated(dev, cand.desc, cand.tex, false);  // our BGRA texture + this texture as "placeholder"
+        for (ID3D11ShaderResourceView* v : cand.views) OnPlaceholderViewCreated(dev, v, nullptr);
+        Logf("TAKEOVER CarPlay on candidate #%d of %zu (%zu views)", pick, g_gps.size(), cand.views.size());
+        dev->Release();
+    }
+    cand.tex->Release();
+}
+
+void OnGpsTargetCreated(const D3D11_TEXTURE2D_DESC& d, ID3D11Texture2D* tex) {
+    int index;
+    bool select;
+    {
+        std::lock_guard<std::mutex> lock(g_screenMx);
+        for (size_t i = 0; i < g_gps.size();) {  // forget screens the game has let go of
+            if (g_gps[i].tex != g_placeholder && OnlyWeHold(g_gps[i].tex)) {
+                g_gps[i].tex->Release();
+                g_gps.erase(g_gps.begin() + static_cast<std::ptrdiff_t>(i));
+            } else {
+                ++i;
+            }
+        }
+        if (g_gps.size() >= 8) return;
+        tex->AddRef();
+        g_gps.push_back({tex, d, {}});
+        index = static_cast<int>(g_gps.size()) - 1;
+        select = index == g_gpsPick;
+    }
+    LogDesc("TAKEOVER cab screen candidate", d, false);
+    Logf("TAKEOVER candidate #%d = %p%s", index, static_cast<void*>(tex), select ? " (shown)" : "");
+    if (select) GpsSelect(index);
+}
+
+// A new view may reuse the address of a released one: drop it from every candidate's list.
+void GpsForgetView(ID3D11ShaderResourceView* view) {
+    std::lock_guard<std::mutex> lock(g_screenMx);
+    for (GpsCand& c : g_gps) c.views.erase(std::remove(c.views.begin(), c.views.end(), view), c.views.end());
+}
+
+// A view of a known candidate: remember it, and swap it at once if that candidate is the one shown.
+void OnGpsViewCreated(ID3D11Device* dev, ID3D11Resource* res, ID3D11ShaderResourceView* view,
+                      const D3D11_SHADER_RESOURCE_VIEW_DESC* desc) {
+    bool shown = false;
+    {
+        std::lock_guard<std::mutex> lock(g_screenMx);
+        for (size_t i = 0; i < g_gps.size(); ++i) {
+            if (g_gps[i].tex != res) continue;
+            g_gps[i].views.push_back(view);
+            shown = static_cast<int>(i) == g_gpsPick && g_placeholder == g_gps[i].tex;
+            break;
+        }
+    }
+    if (shown) OnPlaceholderViewCreated(dev, view, desc);
+}
+
+// Ctrl+Shift+F10: candidate 0 -> 1 -> ... -> off -> 0
+void GpsCycle() {
+    int next;
+    {
+        std::lock_guard<std::mutex> lock(g_screenMx);
+        const int n = static_cast<int>(g_gps.size());
+        next = g_gpsPick + 1 >= n ? -1 : g_gpsPick + 1;
+        if (g_gpsPick < 0) next = n > 0 ? 0 : -1;
+    }
+    GpsSelect(next);
+}
+
 HRESULT STDMETHODCALLTYPE HookCreateTexture2D(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC* desc,
                                               const D3D11_SUBRESOURCE_DATA* init, ID3D11Texture2D** out) {
     HRESULT hr = g_createTex2D(dev, desc, init, out);
@@ -198,6 +317,7 @@ HRESULT STDMETHODCALLTYPE HookCreateTexture2D(ID3D11Device* dev, const D3D11_TEX
     }
     if (g_replaceTexture && *out && IsPlaceholder(desc)) OnPlaceholderCreated(dev, *desc, *out, init != nullptr);
     else if (g_replaceTexture && *out && EtaIsPlaceholder(desc)) EtaOnPlaceholderCreated(dev, *desc, *out, g_createTex2D);
+    else if (g_replaceTexture && *out && GetSettings().gpsTakeover && IsGpsRenderTarget(desc)) OnGpsTargetCreated(*desc, *out);
     return hr;
 }
 
@@ -430,6 +550,7 @@ HRESULT STDMETHODCALLTYPE HookCreateSRV(ID3D11Device* dev, ID3D11Resource* res,
         // A new view may reuse the address of a released one: forget what we knew about it.
         RemoveSwapSrv(*out);
         EtaForgetView(*out);
+        if (GetSettings().gpsTakeover) GpsForgetView(*out);
         if (EtaIsPlaceholderResource(res)) EtaOnPlaceholderViewCreated(dev, res, *out, desc, g_createSrv);
         {
             std::lock_guard<std::mutex> lock(g_mx);
@@ -441,6 +562,7 @@ HRESULT STDMETHODCALLTYPE HookCreateSRV(ID3D11Device* dev, ID3D11Resource* res,
             isPlaceholder = res == g_placeholder;
         }
         if (isPlaceholder) OnPlaceholderViewCreated(dev, *out, desc);
+        else if (res && GetSettings().gpsTakeover) OnGpsViewCreated(dev, res, *out, desc);
     }
     return hr;
 }
@@ -539,6 +661,14 @@ void OnFrame(IDXGISwapChain* sc) {
     EtaUpload();
     TouchOnPresent(sc);
 
+    if (GetSettings().gpsTakeover) {  // Ctrl+Shift+F10: CarPlay on the next candidate screen / back to the stock GPS
+        static bool f10 = false;
+        bool now = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
+                   (GetAsyncKeyState(VK_F10) & 0x8000) && ForegroundIsUs();
+        if (now && !f10) GpsCycle();
+        f10 = now;
+    }
+
     if (!GetSettings().textureFinder) return;  // developer tool, off unless [debug] texture_finder=1
     bool chord = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) && ForegroundIsUs();
     for (int i = 0; i < 4; ++i) {
@@ -610,6 +740,8 @@ LRESULT CALLBACK DummyWndProc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWi
 bool D3D11HooksInstall(bool replaceTexture, bool uploadFrames, bool touch) {
     g_replaceTexture = replaceTexture;
     g_uploadFrames = uploadFrames;
+    g_gpsPick = GetSettings().gpsTakeoverPick;
+    if (GetSettings().gpsTakeover) Logf("TAKEOVER on: CarPlay replaces the game's cab screen (start with candidate %d)", g_gpsPick);
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = DummyWndProc;
     wc.hInstance = GetModuleHandleW(nullptr);

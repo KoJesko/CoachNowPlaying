@@ -79,6 +79,21 @@ On a Coaches DLC job this build reads the game's `bus_job` data and announces **
 before it ("our next stop is Egilsstaðir…"), and the end of the trip at the last stop. The passenger TV shows the next
 stop. Upstream only knew the freight job, so it said "our destination" before whatever the GPS pointed at.
 
+### Without the mod (TruckersMP): CarPlay on the game's own cab screen
+
+TruckersMP does not load Workshop mods, so the mod's placeholder textures never appear there. With
+`[screen] gps_takeover=1` the plugin instead shows its picture on the game's own cab screen. The game draws that
+screen into a 1024x1024 RGBA8 render target, found with upstream's texture finder (`[debug] texture_finder=1`).
+A coach has two textures that look like it, so **Ctrl+Shift+F10** moves the picture to the next one, and after the
+last one back to the stock GPS. The same key switches between CarPlay and the map while driving.
+`gps_takeover_pick` (default 0) is the one it starts with. Leave this off when the mod is loaded. Don't let
+PrismTextureStreamer take over the GPS screen at the same time either.
+
+Credit: [PrismTextureStreamer](https://github.com/Baldywaldy09/PrismTextureStreamer) by Baldywaldy09 showed that a
+plain SDK plugin can take over a cab screen on TruckersMP. Its code was not used (it has no licence). This build
+reuses CoachNowPlaying's own view swap. For Prism itself on Linux/Wayland, see
+[gabors0's fork](https://github.com/gabors0/PrismTextureStreamer) (issue #9 upstream).
+
 ### English announcements
 
 This build picks the Piper voice by language: `voice/de_*.onnx` for German (Thorsten, in the upstream ZIP) and

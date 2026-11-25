@@ -28,6 +28,10 @@ struct Settings {
     int announceVolume = 80;        // [announce] volume: 0..100
     std::wstring announceLanguage = L"auto";  // [announce] language: auto (game language) or codes, e.g. "auto,en"
     bool textureFinder = false;     // [debug] texture_finder: developer tool (Ctrl+Shift+F6..F9), not in the default ini
+    // [screen] gps_takeover: 1 = without the mod (e.g. TruckersMP), show the CarPlay picture on the game's own cab
+    // screen (its 1024x1024 render target). Ctrl+Shift+F10 cycles: candidate 0, 1, ..., off (stock GPS).
+    bool gpsTakeover = false;
+    int gpsTakeoverPick = 0;        // [screen] gps_takeover_pick: which matching texture to use first (-1 = start off)
 };
 
 void LoadSettings(const std::wstring& dir);
