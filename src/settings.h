@@ -32,6 +32,10 @@ struct Settings {
     // screen (its 1024x1024 render target). Ctrl+Shift+F10 cycles: candidate 0, 1, ..., off (stock GPS).
     bool gpsTakeover = false;
     int gpsTakeoverPick = 0;        // [screen] gps_takeover_pick: which matching texture to use first (-1 = start off)
+    // [screen] gps_takeover_hide: displays (meshes "indices:start:base", comma separated) that share the cab screen
+    // texture but keep the game's own picture, e.g. the middle of a Volvo 9700's instrument cluster. Ctrl+Shift+F11.
+    std::wstring gpsTakeoverHide;
+    std::wstring ini;               // full path of CoachNowPlaying.ini
 };
 
 void LoadSettings(const std::wstring& dir);

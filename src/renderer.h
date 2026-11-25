@@ -8,7 +8,9 @@ namespace ep {
 constexpr uint32_t kCanvasWidth = 800;
 constexpr uint32_t kCanvasHeight = 480;
 constexpr uint32_t kScreenWidth = 1024;
-constexpr uint32_t kScreenHeight = 640;
+// 640 with the mod. GPS takeover: 1024, like the game's own square cab screen texture, because the display only shows a
+// band of it (on the Volvo 9700 a third of the height) and the text needs those rows. Set once before the renderer starts.
+inline uint32_t kScreenHeight = 640;
 
 struct FrameView {
     const uint8_t* data = nullptr;  // BGRA, premultiplied, opaque

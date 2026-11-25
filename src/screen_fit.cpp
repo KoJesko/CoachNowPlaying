@@ -1,5 +1,6 @@
 #include "screen_fit.h"
 
+#include "d3d11_hooks.h"
 #include "log.h"
 #include "renderer.h"
 #include "touch.h"
@@ -145,6 +146,116 @@ bool ReadRange(ID3D11DeviceContext* ctx, ID3D11Buffer* src, UINT start, UINT len
     }
     staging->Release();
     return ok;
+}
+
+
+// ---- GPS takeover: the display is a 2D quad in the dashboard's UI pass ---------------------------------------------
+// Without the mod the game draws each display as one flat quad (4 corners, 6 indices) into the dashboard's render target,
+// not as a 3D mesh. Each corner has a 2D position (pixels of that target, or -1..1) and a texture coordinate. Which bytes
+// hold them is found by trying: both have to form the same rectangle. The quad then tells which part of the texture the
+// display shows, its proportions and which way the texture runs. The position layout is kept so the draw hook can tell
+// the displays apart by where they sit.
+QuadLayout g_quad;  // under g_mx
+
+bool TwoValues(const double v[4], int& highMask, double& lo, double& hi) {
+    lo = std::min(std::min(v[0], v[1]), std::min(v[2], v[3]));
+    hi = std::max(std::max(v[0], v[1]), std::max(v[2], v[3]));
+    const double tol = std::max(1e-4, (hi - lo) * 0.01);
+    if (hi - lo <= tol) return false;
+    highMask = 0;
+    int highs = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (std::fabs(v[i] - hi) <= tol) {
+            highMask |= 1 << i;
+            ++highs;
+        } else if (std::fabs(v[i] - lo) > tol) {
+            return false;
+        }
+    }
+    return highs == 2;
+}
+
+bool AnalyzeUiQuad(const std::vector<uint8_t>& bytes, UINT stride, const std::vector<uint32_t>& unique, uint32_t minV, int rtW,
+                   int rtH, Geometry& g) {
+    if (unique.size() != 4 || stride < 12 || stride > 64) return false;
+    auto corner = [&](int i) { return &bytes[static_cast<size_t>(unique[i] - minV) * stride]; };
+    for (int i = 0; i < 4; ++i) {
+        std::string line;
+        for (UINT o = 0; o + 4 <= stride; o += 4) {
+            float f;
+            uint32_t u;
+            memcpy(&f, corner(i) + o, 4);
+            memcpy(&u, corner(i) + o, 4);
+            char b[40];
+            snprintf(b, sizeof b, " %08x(%.5g)", u, f);
+            line += b;
+        }
+        Logf("FIT   quad corner %d:%s", i, line.c_str());
+    }
+    static const DXGI_FORMAT uvFormats[] = {DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_UNORM};
+    for (DXGI_FORMAT uf : uvFormats) {
+        const UINT usz = FormatBytes(uf);
+        for (UINT po = 0; po + 8 <= stride; po += 4) {
+            for (UINT uo = 0; uo + usz <= stride; uo += 2) {
+                if (uo < po + 8 && po < uo + usz) continue;
+                double X[4], Y[4], U[4], V[4];
+                bool good = true;
+                for (int i = 0; i < 4 && good; ++i) {
+                    float a[4];
+                    int n = 0;
+                    DecodeAttribute(corner(i) + po, DXGI_FORMAT_R32G32_FLOAT, a, n);
+                    X[i] = a[0];
+                    Y[i] = a[1];
+                    DecodeAttribute(corner(i) + uo, uf, a, n);
+                    U[i] = a[0];
+                    V[i] = a[1];
+                    good = std::isfinite(X[i]) && std::isfinite(Y[i]) && std::fabs(X[i]) < 16384 && std::fabs(Y[i]) < 16384 &&
+                           U[i] > -0.02 && U[i] < 1.02 && V[i] > -0.02 && V[i] < 1.02;
+                }
+                int xm, ym, um, vm;
+                double x0, x1, y0, y1, u0, u1, v0, v1;
+                if (!good || !TwoValues(X, xm, x0, x1) || !TwoValues(Y, ym, y0, y1) || !TwoValues(U, um, u0, u1) ||
+                    !TwoValues(V, vm, v0, v1)) {
+                    continue;
+                }
+                auto same = [](int a, int b) { return a == b || a == (~b & 15); };
+                int rightAxis;
+                if (same(xm, um) && same(ym, vm)) rightAxis = 0;
+                else if (same(xm, vm) && same(ym, um)) rightAxis = 1;
+                else continue;
+                const bool ndc = std::fabs(x0) <= 1.01 && std::fabs(x1) <= 1.01 && std::fabs(y0) <= 1.01 && std::fabs(y1) <= 1.01;
+                double W = x1 - x0, H = y1 - y0;
+                if (ndc) {
+                    W *= rtW > 0 ? rtW / 2.0 : 1.0;
+                    H *= rtH > 0 ? rtH / 2.0 : 1.0;
+                }
+                const int rMask = rightAxis == 0 ? um : vm, uMask = rightAxis == 0 ? vm : um;
+                g.rightAxis = rightAxis;
+                g.rightSign = xm == rMask ? 1 : -1;  // x grows with the texture axis
+                g.upAxis = 1 - rightAxis;
+                const int yWithUv = ym == uMask ? 1 : -1;  // y grows with the texture axis
+                g.upSign = ndc ? yWithUv : -yWithUv;       // up = +y in -1..1 space, -y in pixels (y runs down)
+                // The second texture of the game's pair is the upside-down copy; the game keeps it because the dashboard
+                // target is shown upside down on the cab display. So on it, up runs the other way.
+                if (TakeoverFlip()) g.upSign = -g.upSign;
+                g.uvMin[0] = u0;
+                g.uvMax[0] = u1;
+                g.uvMin[1] = v0;
+                g.uvMax[1] = v1;
+                g.lenU = (rightAxis == 0 ? W : H) / (u1 - u0);
+                g.lenV = (rightAxis == 0 ? H : W) / (v1 - v0);
+                g.ok = g.orientOk = true;
+                g_quad = QuadLayout{true, stride, po, ndc};
+                Logf("FIT UI quad: position float2 at byte %u (%s), texcoord format %d at byte %u | %.1f x %.1f px (aspect %.3f) "
+                     "| texture u %.3f..%.3f v %.3f..%.3f | right = texture %c%c, up = texture %c%c",
+                     po, ndc ? "-1..1" : "pixels", static_cast<int>(uf), uo, W, H, W / H, u0, u1, v0, v1,
+                     g.rightSign > 0 ? '+' : '-', g.rightAxis == 0 ? 'u' : 'v', g.upSign > 0 ? '+' : '-', g.upAxis == 0 ? 'u' : 'v');
+                return true;
+            }
+        }
+    }
+    Logf("FIT not a UI quad either");
+    return false;
 }
 
 // ---- least squares: p = c0 + c1*u + c2*v ------------------------------------------------------------------------
@@ -545,7 +656,29 @@ Geometry Analyze(ID3D11DeviceContext* ctx, UINT indexCount, UINT startIndex, INT
         Logf("FIT input layout %p was created before the plugin started, guessing the vertex format (stride %u)",
              static_cast<void*>(layout), strides[0]);
         if (!loadSlot(0) || !GuessLayout(unique, minV, Source{&slotBytes[0], strides[0]}, chosen)) {
-            Logf("FIT could not work out the vertex format");
+            int rtW = 0, rtH = 0;
+            ID3D11RenderTargetView* rtv = nullptr;
+            ctx->OMGetRenderTargets(1, &rtv, nullptr);
+            if (rtv) {
+                ID3D11Resource* r = nullptr;
+                rtv->GetResource(&r);
+                ID3D11Texture2D* t = nullptr;
+                if (r && SUCCEEDED(r->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&t))) && t) {
+                    D3D11_TEXTURE2D_DESC td{};
+                    t->GetDesc(&td);
+                    rtW = static_cast<int>(td.Width);
+                    rtH = static_cast<int>(td.Height);
+                    t->Release();
+                }
+                if (r) r->Release();
+                rtv->Release();
+            }
+            bool quad = false;
+            if (!slotBytes[0].empty()) {
+                std::lock_guard<std::mutex> lock(g_mx);
+                quad = AnalyzeUiQuad(slotBytes[0], strides[0], unique, minV, rtW, rtH, g);
+            }
+            if (!quad) Logf("FIT could not work out the vertex format");
             cleanup();
             return g;
         }
@@ -914,6 +1047,11 @@ void FitCaptureGeometry(ID3D11DeviceContext* ctx, UINT indexCount, UINT startInd
     ctx->IAGetIndexBuffer(&ib, &fmt, &ibOffset);
     const ULONGLONG now = GetTickCount64();
     DrawSig sig{vb, ib, indexCount, startIndex, baseVertex, now};
+    {
+        // UI quads (GPS takeover) come from a vertex buffer the game refills all the time: the base vertex says nothing.
+        std::lock_guard<std::mutex> lock(g_mx);
+        if (g_quad.ok) sig.base = 0;
+    }
     if (vb) vb->Release();
     if (ib) ib->Release();
     bool newVehicle = false;
@@ -935,6 +1073,7 @@ void FitCaptureGeometry(ID3D11DeviceContext* ctx, UINT indexCount, UINT startInd
         // A screen can be made of several draw calls (screen, glass, frame ...): look at up to six different ones during
         // the first 20 seconds and keep the largest flat display among them.
         const bool budget = g_attempts < 6 && now - g_resetTick < 20000;
+        if (g_seen.size() >= 64) g_seen.erase(g_seen.begin());  // bounded: draw calls whose offsets keep changing
         g_seen.push_back(sig);
         if (!budget) return;
         ++g_attempts;
@@ -1017,6 +1156,15 @@ void FitNoteScanWindow(const ScanWindow& w) {
         }
         Recompute();
     }
+}
+
+QuadLayout FitQuadLayout() {
+    std::lock_guard<std::mutex> lock(g_mx);
+    return g_quad;
+}
+
+bool FitReadBuffer(ID3D11DeviceContext* ctx, ID3D11Buffer* src, UINT start, UINT len, std::vector<uint8_t>& out) {
+    return ReadRange(ctx, src, start, len, out);
 }
 
 ScreenFit FitGet() {

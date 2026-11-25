@@ -1,6 +1,7 @@
 #include "renderer.h"
 
 #include "cover_lookup.h"
+#include "d3d11_hooks.h"
 #include "log.h"
 #include "media.h"
 #include "radio_tracker.h"
@@ -413,14 +414,24 @@ void Renderer::DrawMedia(const MediaSnapshot& m, double t) {
     std::wstring source = app.find("spotify") != std::string::npos ? L"SPOTIFY" : ToWide(m.app);
     if (source.size() > 4 && source.compare(source.size() - 4, 4, L".exe") == 0) source.resize(source.size() - 4);
     for (auto& c : source) c = static_cast<wchar_t>(towupper(c));
-    Text(source, 40, 24, 300, 24, 15, DWRITE_FONT_WEIGHT_SEMI_BOLD, Rgb(accent_.r, accent_.g, accent_.b, 0.95f));
+    // GPS takeover: the game's cab screens are small and coarse (about 700 x 280 pixels on the Volvo 9700), so the text
+    // is larger there; the lines still end above the progress bar.
+    const bool big = GetSettings().gpsTakeover;
+    Text(source, 40, 24, 300, big ? 30 : 24, big ? 21 : 15, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+         Rgb(accent_.r, accent_.g, accent_.b, 0.95f));
 
     DrawCover(40, 80, 280);
 
     const float x0 = kBarX, w = BarWidth(canvasW_);  // the text column takes the width of the display
-    Text(ToWide(m.title), x0, 84, w, 112, 38, DWRITE_FONT_WEIGHT_SEMI_BOLD, Rgb(1, 1, 1), true);
-    Text(ToWide(m.artist), x0, 202, w, 36, 24, DWRITE_FONT_WEIGHT_NORMAL, Rgb(1, 1, 1, 0.82f));
-    Text(ToWide(m.album), x0, 240, w, 28, 18, DWRITE_FONT_WEIGHT_NORMAL, Rgb(1, 1, 1, 0.5f));
+    if (big) {
+        Text(ToWide(m.title), x0, 72, w, 130, 48, DWRITE_FONT_WEIGHT_SEMI_BOLD, Rgb(1, 1, 1), true);
+        Text(ToWide(m.artist), x0, 206, w, 46, 34, DWRITE_FONT_WEIGHT_NORMAL, Rgb(1, 1, 1, 0.88f));
+        Text(ToWide(m.album), x0, 256, w, 38, 26, DWRITE_FONT_WEIGHT_NORMAL, Rgb(1, 1, 1, 0.62f));
+    } else {
+        Text(ToWide(m.title), x0, 84, w, 112, 38, DWRITE_FONT_WEIGHT_SEMI_BOLD, Rgb(1, 1, 1), true);
+        Text(ToWide(m.artist), x0, 202, w, 36, 24, DWRITE_FONT_WEIGHT_NORMAL, Rgb(1, 1, 1, 0.82f));
+        Text(ToWide(m.album), x0, 240, w, 28, 18, DWRITE_FONT_WEIGHT_NORMAL, Rgb(1, 1, 1, 0.5f));
+    }
 
     if (m.duration > 1.0) {
         const TouchState ts = TouchGetState();
@@ -668,7 +679,7 @@ void Renderer::CopyOut() {
     lock->GetDataPointer(&size, &src);
     if (!src) return;
     const size_t row = static_cast<size_t>(kScreenWidth) * 4;
-    const bool flip = GetSettings().flipVertical && !fitActive_;  // a valid fit already knows the orientation
+    const bool flip = (GetSettings().flipVertical != TakeoverFlip()) && !fitActive_;  // a valid fit already knows the orientation
     for (uint32_t y = 0; y < kScreenHeight; ++y) {
         uint32_t from = flip ? kScreenHeight - 1 - y : y;
         memcpy(&pixels_[y * row], src + static_cast<size_t>(from) * stride, row);

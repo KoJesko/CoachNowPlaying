@@ -75,4 +75,15 @@ void FitNoteScanWindow(const ScanWindow& w);
 
 ScreenFit FitGet();
 
+// GPS takeover: where the corner positions sit in the vertex data of the display quads (found by the fit), so the
+// draw hook can tell the displays apart by where they are on the dashboard.
+struct QuadLayout {
+    bool ok = false;
+    UINT stride = 0, posOffset = 0;  // position = float2 at posOffset
+    bool ndc = false;                // -1..1 instead of pixels
+};
+QuadLayout FitQuadLayout();
+// Copies a range of a buffer to the CPU (waits for the GPU: only for rare, small reads).
+bool FitReadBuffer(ID3D11DeviceContext* ctx, ID3D11Buffer* src, UINT start, UINT len, std::vector<uint8_t>& out);
+
 }  // namespace ep

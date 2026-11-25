@@ -14,6 +14,9 @@
 #include <dxgi1_2.h>
 
 #include <algorithm>
+#include <bitset>
+#include <cmath>
+#include <cwchar>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -34,6 +37,8 @@ using CreateTex2DFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, const D3D11_TEX
 PresentFn g_present;
 Present1Fn g_present1;
 PSSetSRVFn g_psSetSrv;
+using OMSetRTFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*);
+OMSetRTFn g_omSetRt;
 CreateSRVFn g_createSrv;
 CreateTex2DFn g_createTex2D;
 std::atomic<bool> g_off{false};
@@ -201,36 +206,57 @@ void OnPlaceholderViewCreated(ID3D11Device* dev, ID3D11ShaderResourceView* gameV
 }
 
 // ---- GPS takeover ---------------------------------------------------------------------------------------------------
+// The game makes these render targets in pairs (cab screen first, then a second one of the same size) and throws them
+// away and makes new ones whenever the bus is switched off and on again. So the picture follows the screen itself:
+// when the texture we show is released, the first one the game makes next is the new screen.
 struct GpsCand {
     ID3D11Texture2D* tex;  // one reference held by us
     D3D11_TEXTURE2D_DESC desc;
     std::vector<ID3D11ShaderResourceView*> views;  // the game's views of it (keys only, no reference)
+    unsigned seq;  // creation number: the game makes them in pairs, odd = second of a pair (the flipped copy)
 };
-std::vector<GpsCand> g_gps;  // under g_screenMx
-int g_gpsPick = 0;           // index into g_gps, -1 = off (stock screen)
+unsigned g_gpsSeq = 0;
+std::vector<GpsCand> g_gps;            // under g_screenMx, in creation order
+std::atomic<bool> g_drawsReset{false};
+std::atomic<bool> g_takeoverFlip{false};  // shown texture is the second of its pair (a flipped copy of the first)  // a new screen texture: the displays drawn from it are found again
+ID3D11Texture2D* g_gpsShown = nullptr;  // candidate showing our picture, nullptr = none
+bool g_gpsOff = false;                 // switched off with Ctrl+Shift+F10: the stock screen stays until switched on
+int g_gpsSkip = 0;                     // [screen] gps_takeover_pick: skip this many first candidates at the start
+int g_gpsLogged = 0;
 
-// Only we still hold it: the game released the screen (other truck, reload).
+// Only we still hold it (our candidate reference, plus the placeholder reference if it is shown): the game let go.
 bool OnlyWeHold(ID3D11Texture2D* t) {
+    const ULONG ours = 1 + (t == g_placeholder ? 1 : 0);
     t->AddRef();
-    return t->Release() == 1;
+    return t->Release() <= ours;
 }
 
 void ClearSwapSrvs() {
     for (auto& slot : g_swap) slot.store(nullptr);
 }
 
-// Show our picture on candidate `pick` (or nobody for -1). Called without g_screenMx held.
-void GpsSelect(int pick) {
+// Show our picture on `tex` (a known candidate) or on nothing (nullptr). Called without g_screenMx held.
+void GpsSelect(ID3D11Texture2D* tex, const char* why) {
     GpsCand cand{};
+    size_t index = 0, count = 0;
     {
         std::lock_guard<std::mutex> lock(g_screenMx);
-        g_gpsPick = pick;
         ClearSwapSrvs();
-        if (pick < 0 || pick >= static_cast<int>(g_gps.size())) {
-            Logf("TAKEOVER off: the stock cab screen shows (%zu candidates known)", g_gps.size());
+        g_gpsShown = nullptr;
+        g_drawsReset.store(true);
+        count = g_gps.size();
+        for (size_t i = 0; tex && i < g_gps.size(); ++i) {
+            if (g_gps[i].tex == tex) {
+                cand = g_gps[i];
+                index = i;
+            }
+        }
+        if (!cand.tex) {
+            Logf("TAKEOVER off (%s): the stock cab screen shows (%zu candidates known)", why, count);
             return;
         }
-        cand = g_gps[static_cast<size_t>(pick)];
+        g_gpsShown = cand.tex;
+        g_takeoverFlip.store(cand.seq % 2 == 1);
         cand.tex->AddRef();
     }
     ID3D11Device* dev = nullptr;
@@ -238,34 +264,49 @@ void GpsSelect(int pick) {
     if (dev) {
         OnPlaceholderCreated(dev, cand.desc, cand.tex, false);  // our BGRA texture + this texture as "placeholder"
         for (ID3D11ShaderResourceView* v : cand.views) OnPlaceholderViewCreated(dev, v, nullptr);
-        Logf("TAKEOVER CarPlay on candidate #%d of %zu (%zu views)", pick, g_gps.size(), cand.views.size());
+        Logf("TAKEOVER CarPlay on candidate #%zu of %zu = %p (%s, %zu views%s)", index, count,
+             static_cast<void*>(cand.tex), why, cand.views.size(), cand.seq % 2 == 1 ? ", second of a pair: drawn flipped" : "");
         dev->Release();
     }
     cand.tex->Release();
 }
 
 void OnGpsTargetCreated(const D3D11_TEXTURE2D_DESC& d, ID3D11Texture2D* tex) {
-    int index;
-    bool select;
+    bool select = false, lostShown = false;
+    size_t index = 0;
     {
         std::lock_guard<std::mutex> lock(g_screenMx);
         for (size_t i = 0; i < g_gps.size();) {  // forget screens the game has let go of
-            if (g_gps[i].tex != g_placeholder && OnlyWeHold(g_gps[i].tex)) {
+            if (OnlyWeHold(g_gps[i].tex)) {
+                if (g_gps[i].tex == g_gpsShown) {
+                    g_gpsShown = nullptr;
+                    ClearSwapSrvs();
+                    lostShown = true;
+                }
                 g_gps[i].tex->Release();
                 g_gps.erase(g_gps.begin() + static_cast<std::ptrdiff_t>(i));
             } else {
                 ++i;
             }
         }
+        const unsigned seq = g_gpsSeq++;  // counted even when not kept, so the pair halves stay right
         if (g_gps.size() >= 8) return;
         tex->AddRef();
-        g_gps.push_back({tex, d, {}});
-        index = static_cast<int>(g_gps.size()) - 1;
-        select = index == g_gpsPick;
+        g_gps.push_back({tex, d, {}, seq});
+        if (lostShown) g_gpsSkip = std::max(0, GetSettings().gpsTakeoverPick);  // a new pair: same pick as at the start
+        index = g_gps.size() - 1;
+        if (!g_gpsOff && !g_gpsShown) {
+            if (g_gpsSkip > 0) --g_gpsSkip;
+            else select = true;
+        }
     }
-    LogDesc("TAKEOVER cab screen candidate", d, false);
-    Logf("TAKEOVER candidate #%d = %p%s", index, static_cast<void*>(tex), select ? " (shown)" : "");
-    if (select) GpsSelect(index);
+    if (lostShown) Logf("TAKEOVER the shown screen was released by the game (bus switched off/on, reload)");
+    if (g_gpsLogged < 16 || select) {
+        ++g_gpsLogged;
+        LogDesc("TAKEOVER cab screen candidate", d, false);
+        Logf("TAKEOVER candidate #%zu = %p%s", index, static_cast<void*>(tex), select ? " (shown)" : "");
+    }
+    if (select) GpsSelect(tex, lostShown ? "new screen after the old one was released" : "first screen");
 }
 
 // A new view may reuse the address of a released one: drop it from every candidate's list.
@@ -280,26 +321,377 @@ void OnGpsViewCreated(ID3D11Device* dev, ID3D11Resource* res, ID3D11ShaderResour
     bool shown = false;
     {
         std::lock_guard<std::mutex> lock(g_screenMx);
-        for (size_t i = 0; i < g_gps.size(); ++i) {
-            if (g_gps[i].tex != res) continue;
-            g_gps[i].views.push_back(view);
-            shown = static_cast<int>(i) == g_gpsPick && g_placeholder == g_gps[i].tex;
+        for (GpsCand& c : g_gps) {
+            if (c.tex != res) continue;
+            c.views.push_back(view);
+            shown = c.tex == g_gpsShown && g_placeholder == c.tex;
             break;
         }
     }
     if (shown) OnPlaceholderViewCreated(dev, view, desc);
 }
 
-// Ctrl+Shift+F10: candidate 0 -> 1 -> ... -> off -> 0
+// Ctrl+Shift+F10: next candidate -> ... -> off (stock screen) -> first candidate
 void GpsCycle() {
-    int next;
+    ID3D11Texture2D* next = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_screenMx);
-        const int n = static_cast<int>(g_gps.size());
-        next = g_gpsPick + 1 >= n ? -1 : g_gpsPick + 1;
-        if (g_gpsPick < 0) next = n > 0 ? 0 : -1;
+        size_t at = g_gps.size();
+        for (size_t i = 0; i < g_gps.size(); ++i) {
+            if (g_gps[i].tex == g_gpsShown) at = i;
+        }
+        if (!g_gpsShown) next = g_gps.empty() ? nullptr : g_gps[0].tex;
+        else if (at + 1 < g_gps.size()) next = g_gps[at + 1].tex;
+        g_gpsOff = next == nullptr;
     }
-    GpsSelect(next);
+    GpsSelect(next, "Ctrl+Shift+F10");
+}
+
+// ---- GPS takeover: which displays show the picture ------------------------------------------------------------------
+// Some vehicles draw two displays from the same cab screen texture: on the Volvo 9700 the centre screen AND the middle
+// of the instrument cluster (where the game shows the map). Swapping the texture puts CarPlay on both. Each display is
+// drawn on its own: a small quad from a vertex buffer the UI refills all the time (so its offsets change whenever the UI
+// does), into the display's own render target. So a display is recognised by that render target's size and the
+// viewport in it, which stay the same for a vehicle model. For a hidden display the draw hook binds the game's own view again, draws, and rebinds ours.
+// [screen] gps_takeover_hide lists the hidden meshes; Ctrl+Shift+F11 cycles: all displays -> only #0 -> only #1 -> ...
+// Everything here runs on the render thread (immediate context: binds, draws and Present).
+struct ScreenDraw {  // where a display is drawn: render target size, viewport, clip rectangle, order in the frame
+    int rtW, rtH, x, y, w, h;
+    int sx, sy, sw, sh;  // scissor rectangle (all 0 = none set)
+    int ord;             // n-th draw of the screen texture in this frame; -1 unless the order is needed to tell them apart
+    int px0, py0, px1, py1;  // the quad's corners on the dashboard target (pixels, or -1..1 x 1000); all 0 = unknown
+    bool operator==(const ScreenDraw& o) const {
+        return rtW == o.rtW && rtH == o.rtH && x == o.x && y == o.y && w == o.w && h == o.h && sx == o.sx &&
+               sy == o.sy && sw == o.sw && sh == o.sh && ord == o.ord && px0 == o.px0 && py0 == o.py0 && px1 == o.px1 &&
+               py1 == o.py1;
+    }
+};
+// On the Volvo 9700 both displays are drawn into the same 1024x512 target with the same viewport. If everything above
+// but the order is the same while two or more draws per frame show the screen, the order in the frame is used too.
+bool g_useOrder = false;
+int g_frameDraws = 0;       // screen draws so far in this frame
+int g_framesWithMany = 0;   // frames that drew the screen at least twice
+constexpr int kMaxDraws = 8;
+std::vector<ScreenDraw> g_draws;    // displays seen drawing the current screen texture, in first-seen order
+ULONGLONG g_drawTick[kMaxDraws] = {};  // last time each display was drawn with the screen texture
+std::atomic<ULONGLONG> g_rtTick{0};    // last time the game rendered into the shown screen texture
+std::vector<ScreenDraw> g_hidden;   // from [screen] gps_takeover_hide (may include meshes of other vehicles)
+ID3D11DeviceContext* g_screenCtx = nullptr;   // the immediate context that binds the screen (no reference)
+std::bitset<128> g_screenSlots;                // PS slots where we put our view instead of the game's
+ID3D11ShaderResourceView* g_screenOrig[128];   // the game's view in those slots (one of g_swap, no reference)
+
+void LoadHidden() {
+    g_hidden.clear();
+    const wchar_t* p = GetSettings().gpsTakeoverHide.c_str();
+    while (*p) {
+        ScreenDraw d{};
+        int used = 0;
+        if (swscanf(p, L" %dx%d@%d,%d,%d,%d/s%d,%d,%d,%d/o%d/p%d,%d,%d,%d%n", &d.rtW, &d.rtH, &d.x, &d.y, &d.w, &d.h, &d.sx,
+                    &d.sy, &d.sw, &d.sh, &d.ord, &d.px0, &d.py0, &d.px1, &d.py1, &used) == 15 && used > 0) {
+            g_hidden.push_back(d);
+            if (d.ord >= 0) g_useOrder = true;
+            p += used;
+        } else {
+            ++p;
+        }
+        while (*p == L',' || *p == L' ') ++p;
+    }
+}
+
+bool IsHidden(const ScreenDraw& d) { return std::find(g_hidden.begin(), g_hidden.end(), d) != g_hidden.end(); }
+
+void SaveHidden() {
+    std::wstring v;
+    for (const ScreenDraw& d : g_hidden) {
+        wchar_t one[128];
+        swprintf(one, 128, L"%s%dx%d@%d,%d,%d,%d/s%d,%d,%d,%d/o%d/p%d,%d,%d,%d", v.empty() ? L"" : L",", d.rtW, d.rtH, d.x,
+                 d.y, d.w, d.h, d.sx, d.sy, d.sw, d.sh, d.ord, d.px0, d.py0, d.px1, d.py1);
+        v += one;
+    }
+    WritePrivateProfileStringW(L"screen", L"gps_takeover_hide", v.c_str(), GetSettings().ini.c_str());
+}
+
+// Called from the screen bind (HookPSSetSRV) on the immediate context: remember where our view went.
+void NoteScreenSlots(ID3D11DeviceContext* ctx, UINT start, UINT n, ID3D11ShaderResourceView* const* game, const bool* isScreen) {
+    if (g_screenCtx != ctx) {
+        if (ctx->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) return;
+        g_screenCtx = ctx;
+        g_screenSlots.reset();
+    }
+    for (UINT i = 0; i < n && start + i < 128; ++i) {
+        g_screenSlots.set(start + i, isScreen[i]);
+        if (isScreen[i]) g_screenOrig[start + i] = game[i];
+    }
+}
+
+// ---- where each display quad sits ------------------------------------------------------------------------------------
+// Once the fit has worked out the quad's vertex layout, the corners of every screen draw are copied into small staging
+// buffers and read kRing frames later (never waiting for the GPU). Draw number k of a frame is then known to be the quad
+// at that position, so a display keeps its identity whatever else is shown (cluster mode, infotainment page).
+constexpr int kRing = 4, kOrds = 4;
+ID3D11Buffer* g_posStage[kRing][kOrds] = {};
+bool g_posPending[kRing][kOrds] = {};
+int g_posFrame = 0;
+struct OrdPos {
+    bool ok = false;
+    int x0, y0, x1, y1;
+};
+OrdPos g_ordPos[kOrds];
+ID3D11Buffer* g_quadIb = nullptr;  // the index buffer + start the quads come from, and the first corner's index there
+UINT g_quadIbStart = ~0u;
+uint32_t g_quadMinIndex = 0;
+bool g_quadIbOk = false;
+bool g_posResolved = false;     // the current draw's display is known by its position
+bool g_fitResetDone = false;    // the fit was restarted once the displays could be told apart
+
+void CopyQuadCorners(ID3D11DeviceContext* ctx, int ord, UINT start, INT base, const QuadLayout& ql) {
+    if (ord >= kOrds) return;
+    ID3D11Buffer* ib = nullptr;
+    DXGI_FORMAT ibFmt = DXGI_FORMAT_UNKNOWN;
+    UINT ibOff = 0;
+    ctx->IAGetIndexBuffer(&ib, &ibFmt, &ibOff);
+    if (ib && (ib != g_quadIb || start != g_quadIbStart)) {  // index buffer of the quads: read once (a static pattern)
+        g_quadIb = ib;
+        g_quadIbStart = start;
+        g_quadIbOk = false;
+        const UINT isz = ibFmt == DXGI_FORMAT_R16_UINT ? 2 : ibFmt == DXGI_FORMAT_R32_UINT ? 4 : 0;
+        std::vector<uint8_t> bytes;
+        if (isz && FitReadBuffer(ctx, ib, ibOff + start * isz, 6 * isz, bytes)) {
+            uint32_t mn = ~0u;
+            for (int i = 0; i < 6; ++i) {
+                uint32_t v = 0;
+                memcpy(&v, &bytes[static_cast<size_t>(i) * isz], isz);
+                mn = std::min(mn, v);
+            }
+            g_quadMinIndex = mn;
+            g_quadIbOk = true;
+        }
+    }
+    if (ib) ib->Release();
+    if (!g_quadIbOk) return;
+    ID3D11Buffer* vb = nullptr;
+    UINT stride = 0, offset = 0;
+    ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &offset);
+    if (!vb) return;
+    if (stride == ql.stride) {
+        ID3D11Buffer*& stage = g_posStage[g_posFrame][ord];
+        if (!stage) {
+            ID3D11Device* dev = nullptr;
+            ctx->GetDevice(&dev);
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = 4 * 64;
+            bd.Usage = D3D11_USAGE_STAGING;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            if (dev) {
+                dev->CreateBuffer(&bd, nullptr, &stage);
+                dev->Release();
+            }
+        }
+        D3D11_BUFFER_DESC vd{};
+        vb->GetDesc(&vd);
+        const int64_t first = static_cast<int64_t>(offset) + (static_cast<int64_t>(base) + g_quadMinIndex) * stride;
+        if (stage && first >= 0 && first + 4 * stride <= vd.ByteWidth) {
+            D3D11_BOX box{static_cast<UINT>(first), 0, 0, static_cast<UINT>(first) + 4 * stride, 1, 1};
+            ctx->CopySubresourceRegion(stage, 0, 0, 0, 0, vb, 0, &box);
+            g_posPending[g_posFrame][ord] = true;
+        }
+    }
+    vb->Release();
+}
+
+// Once per frame (Present): read the oldest copies, then move on to the next ring slot.
+void ReadQuadCorners(ID3D11DeviceContext* ctx, const QuadLayout& ql) {
+    const int slot = (g_posFrame + 1) % kRing;  // written kRing-1 frames ago
+    for (int k = 0; k < kOrds; ++k) {
+        if (!g_posPending[slot][k] || !g_posStage[slot][k]) continue;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        HRESULT hr = ctx->Map(g_posStage[slot][k], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) continue;  // try again next time round
+        g_posPending[slot][k] = false;
+        if (FAILED(hr)) continue;
+        double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+        for (int i = 0; i < 4; ++i) {
+            float xy[2];
+            memcpy(xy, static_cast<const uint8_t*>(m.pData) + static_cast<size_t>(i) * ql.stride + ql.posOffset, 8);
+            x0 = std::min(x0, static_cast<double>(xy[0]));
+            x1 = std::max(x1, static_cast<double>(xy[0]));
+            y0 = std::min(y0, static_cast<double>(xy[1]));
+            y1 = std::max(y1, static_cast<double>(xy[1]));
+        }
+        ctx->Unmap(g_posStage[slot][k], 0);
+        const double sc = ql.ndc ? 1000.0 : 1.0;
+        if (std::isfinite(x0 + x1 + y0 + y1) && std::fabs(x0) < 1e5 && std::fabs(y1) < 1e5) {
+            g_ordPos[k] = OrdPos{true, static_cast<int>(std::lround(x0 * sc)), static_cast<int>(std::lround(y0 * sc)),
+                                 static_cast<int>(std::lround(x1 * sc)), static_cast<int>(std::lround(y1 * sc))};
+        }
+    }
+    g_posFrame = (g_posFrame + 1) % kRing;
+}
+
+// True if this draw shows the screen on a display that keeps the game's picture.
+bool ScreenDrawHidden(ID3D11DeviceContext* ctx, UINT start, INT base) {
+    if (ctx != g_screenCtx || g_screenSlots.none()) return false;
+    if (g_drawsReset.exchange(false)) g_draws.clear();
+    ScreenDraw d{};
+    {
+        ID3D11RenderTargetView* rtv = nullptr;
+        ctx->OMGetRenderTargets(1, &rtv, nullptr);
+        if (rtv) {
+            ID3D11Resource* r = nullptr;
+            rtv->GetResource(&r);
+            ID3D11Texture2D* t = nullptr;
+            if (r && SUCCEEDED(r->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&t))) && t) {
+                D3D11_TEXTURE2D_DESC td{};
+                t->GetDesc(&td);
+                d.rtW = static_cast<int>(td.Width);
+                d.rtH = static_cast<int>(td.Height);
+                t->Release();
+            }
+            if (r) r->Release();
+            rtv->Release();
+        }
+        D3D11_VIEWPORT vp{};
+        UINT nvp = 1;
+        ctx->RSGetViewports(&nvp, &vp);
+        if (nvp) {
+            d.x = static_cast<int>(vp.TopLeftX + 0.5f);
+            d.y = static_cast<int>(vp.TopLeftY + 0.5f);
+            d.w = static_cast<int>(vp.Width + 0.5f);
+            d.h = static_cast<int>(vp.Height + 0.5f);
+        }
+        D3D11_RECT sc{};
+        UINT nsc = 1;
+        ctx->RSGetScissorRects(&nsc, &sc);
+        if (nsc) {
+            d.sx = sc.left;
+            d.sy = sc.top;
+            d.sw = sc.right - sc.left;
+            d.sh = sc.bottom - sc.top;
+        }
+    }
+    const int ord = g_frameDraws++;
+    const QuadLayout ql = FitQuadLayout();
+    if (ql.ok) {  // known by position (see above); until its position is in, a draw is left alone and not listed
+        CopyQuadCorners(ctx, ord, start, base, ql);
+        g_posResolved = ord < kOrds && g_ordPos[ord].ok;
+        if (!g_posResolved) return false;
+        if (g_useOrder) {
+            g_useOrder = false;
+            g_draws.clear();
+            Logf("TAKEOVER the displays are now told apart by their position on the dashboard");
+        }
+        d.ord = -1;
+        d.px0 = g_ordPos[ord].x0;
+        d.py0 = g_ordPos[ord].y0;
+        d.px1 = g_ordPos[ord].x1;
+        d.py1 = g_ordPos[ord].y1;
+    } else {
+        g_posResolved = true;
+    }
+    d.ord = ql.ok ? -1 : (g_useOrder ? ord : -1);
+    if (!ql.ok && !g_useOrder && ord == 1 && g_draws.size() == 1 && ++g_framesWithMany >= 30) {
+        g_useOrder = true;  // two draws per frame look the same: tell them apart by their order
+        g_draws.clear();
+        Logf("TAKEOVER the displays share target, viewport and clip rectangle: telling them apart by draw order");
+        d.ord = ord;
+    }
+    auto it = std::find(g_draws.begin(), g_draws.end(), d);
+    if (it != g_draws.end()) g_drawTick[it - g_draws.begin()] = GetTickCount64();
+    if (it == g_draws.end() && g_draws.size() < kMaxDraws) {
+        g_drawTick[g_draws.size()] = GetTickCount64();
+        g_draws.push_back(d);
+        Logf("TAKEOVER display #%zu = %dx%d@%d,%d,%d,%d clip %d,%d,%d,%d order %d at %d,%d..%d,%d (%s)", g_draws.size() - 1,
+             d.rtW, d.rtH, d.x, d.y, d.w, d.h, d.sx, d.sy, d.sw, d.sh, d.ord, d.px0, d.py0, d.px1, d.py1,
+             IsHidden(d) ? "game picture, gps_takeover_hide" : "CarPlay");
+    }
+    const bool hidden = !g_hidden.empty() && IsHidden(d);
+    if (hidden && ql.ok && !g_fitResetDone) {  // the fit may have measured the other display before they were told apart
+        g_fitResetDone = true;
+        FitReset("the displays are told apart now: measure the one that shows CarPlay");
+    }
+    return hidden;
+}
+
+// Bind the game's own views (restore = true) or ours again, only into the slots that still hold the other one.
+void SwapScreenSlots(ID3D11DeviceContext* ctx, bool restore) {
+    ID3D11ShaderResourceView* ours = g_ourSrvAtomic.load(std::memory_order_relaxed);
+    if (!ours) return;
+    for (UINT s = 0; s < 128; ++s) {
+        if (!g_screenSlots.test(s)) continue;
+        ID3D11ShaderResourceView* game = g_screenOrig[s];
+        if (!IsSwapSrv(game)) continue;  // the game let go of that view meanwhile
+        ID3D11ShaderResourceView* cur = nullptr;
+        ctx->PSGetShaderResources(s, 1, &cur);
+        const bool expected = cur == (restore ? ours : game);
+        if (cur) cur->Release();
+        if (expected) g_psSetSrv(ctx, s, 1, restore ? &game : &ours);
+    }
+}
+
+// Page probe (for CarPlay pages without the mod): logs when the game renders its screen texture and when each display
+// draws it, so a press of the Infotainment button can be told apart from looking away from the dashboard.
+void STDMETHODCALLTYPE HookOMSetRT(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* rtvs,
+                                   ID3D11DepthStencilView* dsv) {
+    ID3D11Texture2D* shown = g_gpsShown;
+    if (!g_off && shown && rtvs) {
+        for (UINT i = 0; i < n && i < 8; ++i) {
+            if (!rtvs[i]) continue;
+            ID3D11Resource* r = nullptr;
+            rtvs[i]->GetResource(&r);
+            const bool hit = r == shown;
+            if (r) r->Release();
+            if (hit) {
+                g_rtTick.store(GetTickCount64(), std::memory_order_relaxed);
+                break;
+            }
+        }
+    }
+    g_omSetRt(ctx, n, rtvs, dsv);
+}
+
+void PageProbe() {
+    static unsigned last = ~0u;
+    static ULONGLONG since = 0;
+    const ULONGLONG now = GetTickCount64();
+    unsigned state = (now - g_rtTick.load(std::memory_order_relaxed) < 300) ? 1u : 0u;
+    for (size_t i = 0; i < g_draws.size(); ++i) state |= (now - g_drawTick[i] < 300 ? 1u : 0u) << (i + 1);
+    if (state == last) return;
+    char shown[64] = "";
+    for (size_t i = 0; i < g_draws.size(); ++i) {
+        char one[16];
+        snprintf(one, sizeof one, " d%zu=%u", i, (state >> (i + 1)) & 1u);
+        strncat(shown, one, sizeof shown - strlen(shown) - 1);
+    }
+    Logf("TAKEOVER probe: game renders the screen=%u, drawn on:%s (previous state %.1f s)", state & 1u,
+         shown[0] ? shown : " nothing", since ? (now - since) / 1000.0 : 0.0);
+    last = state;
+    since = now;
+}
+
+// Ctrl+Shift+F11: CarPlay on all displays -> only display #0 -> only #1 -> ... -> all.
+void GpsCycleDisplays() {
+    if (g_draws.size() < 2) {
+        Logf("TAKEOVER Ctrl+Shift+F11: only %zu display(s) use this screen, nothing to choose", g_draws.size());
+        return;
+    }
+    // Which one is alone now? -1 = all of them show CarPlay.
+    int alone = -1, shown = 0;
+    for (size_t i = 0; i < g_draws.size(); ++i) {
+        if (!IsHidden(g_draws[i])) {
+            ++shown;
+            alone = static_cast<int>(i);
+        }
+    }
+    if (shown != 1) alone = -1;
+    const int next = alone + 1 >= static_cast<int>(g_draws.size()) ? -1 : alone + 1;
+    for (const ScreenDraw& d : g_draws) g_hidden.erase(std::remove(g_hidden.begin(), g_hidden.end(), d), g_hidden.end());
+    for (int i = 0; next >= 0 && i < static_cast<int>(g_draws.size()); ++i) {
+        if (i != next) g_hidden.push_back(g_draws[static_cast<size_t>(i)]);
+    }
+    SaveHidden();
+    FitReset("Ctrl+Shift+F11: another display shows CarPlay");
+    if (next < 0) Logf("TAKEOVER Ctrl+Shift+F11: CarPlay on all %zu displays", g_draws.size());
+    else Logf("TAKEOVER Ctrl+Shift+F11: CarPlay only on display #%d, the others show the game's picture", next);
 }
 
 HRESULT STDMETHODCALLTYPE HookCreateTexture2D(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC* desc,
@@ -504,6 +896,7 @@ void STDMETHODCALLTYPE HookPSSetSRV(ID3D11DeviceContext* ctx, UINT start, UINT n
         }
         if (any) srvs = swapped;
         if (ours && (any || TouchHasBindings())) TouchNoteBind(ctx, start, n, isScreen);  // beta: where is the screen bound?
+        if (ours && g_gpsShown && (any || g_screenSlots.any())) NoteScreenSlots(ctx, start, n, srvsIn, isScreen);
     }
 
     int mode = g_mode.load(std::memory_order_relaxed);
@@ -667,6 +1060,18 @@ void OnFrame(IDXGISwapChain* sc) {
                    (GetAsyncKeyState(VK_F10) & 0x8000) && ForegroundIsUs();
         if (now && !f10) GpsCycle();
         f10 = now;
+        static bool f11 = false;  // Ctrl+Shift+F11: which displays show CarPlay (vehicles with two on one texture)
+        now = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
+              (GetAsyncKeyState(VK_F11) & 0x8000) && ForegroundIsUs();
+        if (now && !f11) GpsCycleDisplays();
+        f11 = now;
+        PageProbe();
+        g_frameDraws = 0;
+        g_posResolved = true;  // draws outside the screen pass are not affected
+        if (g_screenCtx) {
+            const QuadLayout ql = FitQuadLayout();
+            if (ql.ok) ReadQuadCorners(g_screenCtx, ql);
+        }
     }
 
     if (!GetSettings().textureFinder) return;  // developer tool, off unless [debug] texture_finder=1
@@ -696,8 +1101,16 @@ DrawIndexedInstancedFn g_drawIndexedInstanced;
 
 // The display mesh is read once per screen (shape for the fit), and replayed for the mouse / orientation scan.
 void STDMETHODCALLTYPE HookDrawIndexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base) {
+    if (!g_off && ScreenDrawHidden(ctx, start, base)) {  // a display that keeps the game's picture
+        SwapScreenSlots(ctx, true);
+        g_drawIndexed(ctx, count, start, base);
+        SwapScreenSlots(ctx, false);
+        return;
+    }
     if (!g_off) {
-        if (TouchHasBindings() && FitNeedsGeometry() && TouchScreenBound(ctx)) FitCaptureGeometry(ctx, count, start, base);
+        if (TouchHasBindings() && FitNeedsGeometry() && g_posResolved && TouchScreenBound(ctx)) {
+            FitCaptureGeometry(ctx, count, start, base);
+        }
         if (TouchNeedsReplay(ctx)) TouchReplay(ctx, [&] { g_drawIndexed(ctx, count, start, base); });
     }
     g_drawIndexed(ctx, count, start, base);
@@ -705,8 +1118,16 @@ void STDMETHODCALLTYPE HookDrawIndexed(ID3D11DeviceContext* ctx, UINT count, UIN
 
 void STDMETHODCALLTYPE HookDrawIndexedInstanced(ID3D11DeviceContext* ctx, UINT count, UINT instances, UINT start, INT base,
                                                 UINT startInstance) {
+    if (!g_off && ScreenDrawHidden(ctx, start, base)) {
+        SwapScreenSlots(ctx, true);
+        g_drawIndexedInstanced(ctx, count, instances, start, base, startInstance);
+        SwapScreenSlots(ctx, false);
+        return;
+    }
     if (!g_off) {
-        if (TouchHasBindings() && FitNeedsGeometry() && TouchScreenBound(ctx)) FitCaptureGeometry(ctx, count, start, base);
+        if (TouchHasBindings() && FitNeedsGeometry() && g_posResolved && TouchScreenBound(ctx)) {
+            FitCaptureGeometry(ctx, count, start, base);
+        }
         if (TouchNeedsReplay(ctx)) {
             TouchReplay(ctx, [&] { g_drawIndexedInstanced(ctx, count, instances, start, base, startInstance); });
         }
@@ -740,8 +1161,10 @@ LRESULT CALLBACK DummyWndProc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWi
 bool D3D11HooksInstall(bool replaceTexture, bool uploadFrames, bool touch) {
     g_replaceTexture = replaceTexture;
     g_uploadFrames = uploadFrames;
-    g_gpsPick = GetSettings().gpsTakeoverPick;
-    if (GetSettings().gpsTakeover) Logf("TAKEOVER on: CarPlay replaces the game's cab screen (start with candidate %d)", g_gpsPick);
+    g_gpsSkip = std::max(0, GetSettings().gpsTakeoverPick);
+    LoadHidden();
+    g_gpsOff = GetSettings().gpsTakeoverPick < 0;
+    if (GetSettings().gpsTakeover) Logf("TAKEOVER on: CarPlay replaces the game's cab screen (start with candidate %d)", GetSettings().gpsTakeoverPick);
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = DummyWndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
@@ -778,6 +1201,7 @@ bool D3D11HooksInstall(bool replaceTexture, bool uploadFrames, bool touch) {
     void* createTex2D = vt(dev)[5];
     void* createSrv = vt(dev)[7];
     void* psSetSrv = vt(ctx)[8];
+    void* omSetRt = vt(ctx)[33];
     void* drawIndexed = vt(ctx)[12];
     void* drawIndexedInstanced = vt(ctx)[20];
     void* createInputLayout = vt(dev)[11];
@@ -811,7 +1235,10 @@ bool D3D11HooksInstall(bool replaceTexture, bool uploadFrames, bool touch) {
          reinterpret_cast<void**>(&g_createSrv));
     hook("PSSetShaderResources", psSetSrv, reinterpret_cast<void*>(&HookPSSetSRV),
          reinterpret_cast<void**>(&g_psSetSrv));
-    if (touch || FitEnabled()) {  // draw hooks cost a little on every draw call, so only when they are needed
+    if (GetSettings().gpsTakeover) {
+        hook("OMSetRenderTargets", omSetRt, reinterpret_cast<void*>(&HookOMSetRT), reinterpret_cast<void**>(&g_omSetRt));
+    }
+    if (touch || FitEnabled() || GetSettings().gpsTakeover) {  // draw hooks cost a little on every draw call, so only when they are needed
         hook("DrawIndexed", drawIndexed, reinterpret_cast<void*>(&HookDrawIndexed), reinterpret_cast<void**>(&g_drawIndexed));
         hook("DrawIndexedInstanced", drawIndexedInstanced, reinterpret_cast<void*>(&HookDrawIndexedInstanced),
              reinterpret_cast<void**>(&g_drawIndexedInstanced));
@@ -836,4 +1263,8 @@ void D3D11HooksDisable() {
     g_mode = kIdle;
 }
 
+}  // namespace ep
+
+namespace ep {
+bool TakeoverFlip() { return g_takeoverFlip.load(std::memory_order_relaxed); }
 }  // namespace ep

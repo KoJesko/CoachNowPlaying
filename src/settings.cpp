@@ -98,6 +98,12 @@ void LoadSettings(const std::wstring& dir) {
     g_settings.textureFinder = GetPrivateProfileIntW(L"debug", L"texture_finder", 0, ini.c_str()) != 0;
     g_settings.gpsTakeover = GetPrivateProfileIntW(L"screen", L"gps_takeover", 0, ini.c_str()) != 0;
     g_settings.gpsTakeoverPick = static_cast<int>(GetPrivateProfileIntW(L"screen", L"gps_takeover_pick", 0, ini.c_str()));
+    {
+        wchar_t hide[512] = {};
+        GetPrivateProfileStringW(L"screen", L"gps_takeover_hide", L"", hide, 512, ini.c_str());
+        g_settings.gpsTakeoverHide = hide;
+    }
+    g_settings.ini = ini;
     g_settings.autoFit = static_cast<int>(GetPrivateProfileIntW(L"screen", L"auto_fit", 1, ini.c_str()));
     g_settings.announce = GetPrivateProfileIntW(L"announce", L"enabled", 1, ini.c_str()) != 0;
     g_settings.announceMinutes = std::max(1, static_cast<int>(GetPrivateProfileIntW(L"announce", L"minutes", 5, ini.c_str())));

@@ -319,7 +319,11 @@ extern "C" SCSAPI_RESULT scs_telemetry_init(const scs_u32_t version,
         g_decided = true;
         const bool engine = false;
         features.touch = false;  // the picture is drawn inside the game's UI pass, not on the cabin mesh: no mouse mapping
-        ep::FitInit(0);
+        // With the mod the picture is drawn inside the game's UI pass, so the game places it and the fit stays off.
+        // GPS takeover (no mod) swaps the whole cab screen texture, of which the display only shows a window:
+        // there the fit ([screen] auto_fit) has to find that window and the display's shape.
+        ep::FitInit(ep::GetSettings().gpsTakeover ? ep::GetSettings().autoFit : 0);
+        if (ep::GetSettings().gpsTakeover) ep::kScreenHeight = 1024;
         bool gfx = ep::D3D11HooksInstall(features.screen, features.upload, false);
         ep::CoverLookupStart();
         ep::ExtraSourcesStart();
