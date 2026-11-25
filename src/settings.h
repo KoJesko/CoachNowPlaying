@@ -26,7 +26,7 @@ struct Settings {
     bool announce = true;           // [announce] enabled: chime + voice a few minutes before arrival (coaches only)
     int announceMinutes = 5;        // [announce] minutes: real minutes before arrival
     int announceVolume = 80;        // [announce] volume: 0..100
-    std::wstring announceLanguage = L"auto";  // [announce] language: auto (German voice if installed) or en
+    std::wstring announceLanguage = L"auto";  // [announce] language: auto (game language) or codes, e.g. "auto,en"
     bool textureFinder = false;     // [debug] texture_finder: developer tool (Ctrl+Shift+F6..F9), not in the default ini
 };
 

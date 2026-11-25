@@ -1,5 +1,8 @@
 #include "passenger.h"
 
+#include "announce_text.h"
+#include "tv_text.h"
+
 #include "log.h"
 #include "settings.h"
 #include "text_util.h"
@@ -11,6 +14,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <cwctype>
 #include <mutex>
 #include <thread>
 
@@ -236,9 +240,7 @@ std::wstring AnnounceText(const std::wstring& dest, int hour, bool german, bool 
         return L"Sehr geehrte Fahrgäste, wir erreichen in wenigen Minuten " + (dest.empty() ? std::wstring(L"unser Ziel") : dest) +
                L". Wir bedanken uns für Ihre Reise und wünschen Ihnen " + wish + L".";
     }
-    const wchar_t* wish = hour >= 5 && hour < 18 ? L"a pleasant day" : hour < 22 && hour >= 18 ? L"a pleasant evening" : L"a good night";
-    return L"Ladies and gentlemen, we will arrive in " + (dest.empty() ? std::wstring(L"our destination") : dest) +
-           L" in a few minutes. Thank you for travelling with us, and have " + wish + L".";
+    return false;
 }
 
 void Speak(std::wstring dest, int hour, bool finalStop) {
@@ -377,6 +379,11 @@ void PaxTick(uint32_t gameMinutes, float navSeconds, float navMeters) {
 // ---- TV picture ----------------------------------------------------------------------------------------------------
 std::vector<uint8_t> PaxDraw(UINT w, UINT h, const PaxView& v, uint32_t gameMinutes, bool haveTime, float navSeconds,
                              float navMeters) {
+    return PaxDrawText(w, h, v, gameMinutes, haveTime, navSeconds, navMeters, GetTvText(CurrentGameLanguage()));
+}
+
+std::vector<uint8_t> PaxDrawText(UINT w, UINT h, const PaxView& v, uint32_t gameMinutes, bool haveTime, float navSeconds,
+                                 float navMeters, const TvText& tx) {
     std::vector<uint8_t> out(static_cast<size_t>(w) * h * 4, 255);
     HDC dc = CreateCompatibleDC(nullptr);
     if (!dc) return out;
@@ -405,6 +412,17 @@ std::vector<uint8_t> PaxDraw(UINT w, UINT h, const PaxView& v, uint32_t gameMinu
         HFONT f = CreateFontW(-px, 0, 0, 0, bold ? FW_SEMIBOLD : FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                               CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, bold ? L"Segoe UI Semibold" : L"Segoe UI");
         HGDIOBJ of = SelectObject(dc, f);
+        // longer translations: smaller font until the line fits (down to 60 %)
+        for (int p = px; p > px * 6 / 10; p = p * 92 / 100) {
+            RECT m{0, 0, 0, 0};
+            DrawTextW(dc, s.c_str(), -1, &m, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+            if (m.right <= x2 - x) break;
+            SelectObject(dc, of);
+            DeleteObject(f);
+            f = CreateFontW(-(p * 92 / 100), 0, 0, 0, bold ? FW_SEMIBOLD : FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                            CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, bold ? L"Segoe UI Semibold" : L"Segoe UI");
+            of = SelectObject(dc, f);
+        }
         SetTextColor(dc, c);
         RECT r{x, y, x2, y2};
         DrawTextW(dc, s.c_str(), -1, &r, fmt | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
@@ -423,24 +441,30 @@ std::vector<uint8_t> PaxDraw(UINT w, UINT h, const PaxView& v, uint32_t gameMinu
     box(0, 0, 30, 228, red);
     box(W - 220, 0, 220, 228, navy);
     const bool haveDest = !v.destination.empty();
-    text(haveDest ? L"Fahrtziel  ·  Destination" : L"MAN Lion's Coach", 28, false, grey, 62, 24, W - 240, 62, DT_LEFT | DT_VCENTER);
-    text(haveDest ? v.destination : L"Willkommen an Bord", 70, true, navy, 56, 62, W - 236, 150, DT_LEFT | DT_VCENTER);
-    std::wstring sub = L"Welcome on board";
+    const TvText en = GetTvText(AnnounceLang{L"en", L"gb"});
+    auto both = [&](const std::wstring& a, const std::wstring& b) { return tx.english || a == b ? a : a + L"  ·  " + b; };
+    auto fill = [](std::wstring s, const wchar_t* key, const std::wstring& val) {
+        const size_t p = s.find(key);
+        if (p != std::wstring::npos) s.replace(p, wcslen(key), val);
+        return s;
+    };
+    text(haveDest ? both(tx.destination, en.destination) : L"MAN Lion's Coach", 28, false, grey, 62, 24, W - 240, 62, DT_LEFT | DT_VCENTER);
+    text(haveDest ? v.destination : tx.welcome, 70, true, navy, 56, 62, W - 236, 150, DT_LEFT | DT_VCENTER);
+    std::wstring sub = tx.english ? std::wstring() : en.welcome;
     if (navSeconds > 0.0f && navMeters > 0.0f && haveTime) {
         const uint64_t eta = gameMinutes + static_cast<uint64_t>(std::llround(navSeconds / 60.0f));
-        wchar_t b[96];
-        swprintf(b, 96, L"Ankunft ca. %02u:%02u  ·  noch %d km", static_cast<unsigned>((eta % 1440u) / 60u),
-                 static_cast<unsigned>(eta % 60u), static_cast<int>(std::lround(navMeters / 1000.0f)));
-        sub = b;
+        wchar_t hm[16], km[16];
+        swprintf(hm, 16, L"%02u:%02u", static_cast<unsigned>((eta % 1440u) / 60u), static_cast<unsigned>(eta % 60u));
+        swprintf(km, 16, L"%d", static_cast<int>(std::lround(navMeters / 1000.0f)));
+        sub = fill(fill(tx.arrival, L"{T}", hm), L"{K}", km);
     }
     text(sub, 32, false, grey, 62, 156, W - 240, 206, DT_LEFT | DT_VCENTER);
     // clock + weekday
     if (haveTime) {
-        static const wchar_t* days[] = {L"Montag", L"Dienstag", L"Mittwoch", L"Donnerstag", L"Freitag", L"Samstag", L"Sonntag"};
         wchar_t b[16];
         swprintf(b, 16, L"%02u:%02u", (gameMinutes % 1440u) / 60u, gameMinutes % 60u);
         text(b, 72, true, RGB(0xFF, 0xFF, 0xFF), W - 220, 40, W, 140, DT_CENTER | DT_VCENTER);
-        text(days[(gameMinutes / 1440u) % 7u], 30, false, light, W - 220, 142, W, 190, DT_CENTER | DT_VCENTER);
+        text(tx.days[(gameMinutes / 1440u) % 7u], 30, false, light, W - 220, 142, W, 190, DT_CENTER | DT_VCENTER);
     }
 
     // progress bar source -> destination
@@ -467,17 +491,17 @@ std::vector<uint8_t> PaxDraw(UINT w, UINT h, const PaxView& v, uint32_t gameMinu
     const int py = y, ph = H - 36 - py;
     box(34, py, W - 68, ph, yellow);
     if (v.arriving) {
-        text(L"Nächster Halt  ·  Next stop", 34, false, brown2, 70, py + 24, W - 70, py + 70, DT_LEFT | DT_VCENTER);
-        text(haveDest ? v.destination : L"Ziel / Destination", 84, true, wine, 64, py + 76, W - 70, py + 186, DT_LEFT | DT_VCENTER);
-        text(L"Bitte nichts im Bus vergessen.", 36, false, brown, 70, py + ph - 128, W - 70, py + ph - 78, DT_LEFT | DT_VCENTER);
-        text(L"Please take all your belongings with you.", 30, false, brown2, 70, py + ph - 76, W - 70, py + ph - 30, DT_LEFT | DT_VCENTER);
+        text(both(tx.nextStop, en.nextStop), 34, false, brown2, 70, py + 24, W - 70, py + 70, DT_LEFT | DT_VCENTER);
+        text(haveDest ? v.destination : (tx.english || tx.target == en.target ? tx.target : tx.target + L" / " + en.target), 84, true, wine, 64, py + 76, W - 70, py + 186, DT_LEFT | DT_VCENTER);
+        text(tx.belongings, 36, false, brown, 70, py + ph - 128, W - 70, py + ph - 78, DT_LEFT | DT_VCENTER);
+        if (!tx.english) text(en.belongings, 30, false, brown2, 70, py + ph - 76, W - 70, py + ph - 30, DT_LEFT | DT_VCENTER);
     } else {
-        text(L"Gute Fahrt!", 64, true, wine, 66, py + 18, W - 70, py + 110, DT_LEFT | DT_VCENTER);
+        text(tx.goodTrip, 64, true, wine, 66, py + 18, W - 70, py + 110, DT_LEFT | DT_VCENTER);
         const int ly = py + ph - 250 > py + 110 ? py + ph - 250 : py + 110;
-        text(L"Bitte während der Fahrt angeschnallt bleiben.", 36, false, brown, 70, ly, W - 70, ly + 50, DT_LEFT | DT_VCENTER);
-        text(L"Please keep your seat belt fastened.", 30, false, brown2, 70, ly + 50, W - 70, ly + 94, DT_LEFT | DT_VCENTER);
-        text(L"Kostenloses WLAN  ·  WC im Heck", 36, false, brown, 70, ly + 130, W - 70, ly + 180, DT_LEFT | DT_VCENTER);
-        text(L"Free Wi-Fi  ·  Toilet at the rear", 30, false, brown2, 70, ly + 180, W - 70, ly + 224, DT_LEFT | DT_VCENTER);
+        text(tx.seatBelt, 36, false, brown, 70, ly, W - 70, ly + 50, DT_LEFT | DT_VCENTER);
+        if (!tx.english) text(en.seatBelt, 30, false, brown2, 70, ly + 50, W - 70, ly + 94, DT_LEFT | DT_VCENTER);
+        text(tx.wifi, 36, false, brown, 70, ly + 130, W - 70, ly + 180, DT_LEFT | DT_VCENTER);
+        if (!tx.english) text(en.wifi, 30, false, brown2, 70, ly + 180, W - 70, ly + 224, DT_LEFT | DT_VCENTER);
     }
     GdiFlush();
     memcpy(out.data(), bits, out.size());
