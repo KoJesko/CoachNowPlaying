@@ -26,6 +26,7 @@ rsvg-convert for SVG station logos.
 
 import base64
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
@@ -361,13 +362,19 @@ def same_song(stream_song, shazam_song):
 ART_KEYS = ("imageUrl", "image", "imageURL", "artworkUrl", "artwork", "coverUrl", "cover", "albumArt")
 
 
-# Image addresses taken from radio stream metadata: whoever runs a station chooses them, so they are only fetched from
-# public internet hosts (never this computer or the home network), redirects included.
-_untrusted_urls = set()
+# Cover images on the web are only fetched from public internet hosts, never from this computer or the home network:
+# a station's stream metadata names any address its operator likes. The address actually connected to is checked
+# (before anything is sent, also before TLS), on every redirect too, so a name that changes its address in between
+# cannot get through.
+def _is_public_ip(ip):
+    try:
+        return ipaddress.ip_address(ip.split("%")[0]).is_global
+    except ValueError:
+        return False
 
 
 def public_host(url):
-    """True if every address the URL's host resolves to is a public internet address."""
+    """True if every address the URL's host resolves to is a public internet address (a quick early check)."""
     host = urllib.parse.urlsplit(url).hostname
     if not host:
         return False
@@ -375,23 +382,44 @@ def public_host(url):
         infos = socket.getaddrinfo(host, None)
     except OSError:
         return False
-    for info in infos:
-        try:
-            if not ipaddress.ip_address(info[4][0].split("%")[0]).is_global:
-                return False
-        except ValueError:
-            return False
-    return bool(infos)
+    return bool(infos) and all(_is_public_ip(info[4][0]) for info in infos)
+
+
+class _PeerCheck(http.client.HTTPConnection):
+    def connect(self):
+        super().connect()  # TCP only; for HTTPS the TLS handshake follows after this check
+        peer = self.sock.getpeername()[0]
+        if not _is_public_ip(peer):
+            self.sock.close()
+            raise OSError(f"refusing to fetch from non-public address {peer}")
+
+
+class _PublicHTTP(_PeerCheck):
+    pass
+
+
+class _PublicHTTPS(http.client.HTTPSConnection, _PeerCheck):  # MRO: HTTPS -> _PeerCheck -> HTTPConnection
+    pass
+
+
+class _PublicHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_PublicHTTP, req)
+
+
+class _PublicHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PublicHTTPS, req, context=self._context)
 
 
 class _PublicRedirects(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not newurl.startswith(("http://", "https://")) or not public_host(newurl):
-            raise urllib.error.URLError(f"redirect to a non-public address refused: {newurl[:80]}")
+        if not newurl.startswith(("http://", "https://")):
+            raise urllib.error.URLError(f"redirect to a non-web address refused: {newurl[:80]}")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_public_opener = urllib.request.build_opener(_PublicRedirects)
+_public_opener = urllib.request.build_opener(_PublicHTTPHandler, _PublicHTTPSHandler, _PublicRedirects)
 
 
 def icy_art(meta):
@@ -406,12 +434,7 @@ def icy_art(meta):
         value = next((data[k] for k in ART_KEYS if isinstance(data.get(k), str) and data[k]), "")
     elif not re.search(r"\.(jpe?g|png|webp)(\?|$)", value, re.I):
         return None  # a plain link to the station's website, not a picture
-    if not value.startswith(("http://", "https://")):
-        return None
-    if len(_untrusted_urls) > 500:
-        _untrusted_urls.clear()
-    _untrusted_urls.add(value)
-    return value
+    return value if value.startswith(("http://", "https://")) else None
 
 
 def split_song(text, station):
@@ -710,15 +733,11 @@ def _load_image(src):
             header, _, data = src.partition(",")
             return base64.b64decode(data) if ";base64" in header else urllib.parse.unquote_to_bytes(data)
         elif src.startswith(("http://", "https://")):
+            if not public_host(src):
+                log(f"cover: refusing artwork on a non-public address: {src[:80]}")
+                return None
             req = urllib.request.Request(src, headers={"User-Agent": "coach-mpris-bridge"})
-            if src in _untrusted_urls:  # from a station's stream metadata: public hosts only
-                if not public_host(src):
-                    log(f"cover: refusing station artwork on a non-public address: {src[:80]}")
-                    return None
-                opener = _public_opener.open
-            else:
-                opener = urllib.request.urlopen
-            with opener(req, timeout=5) as r:
+            with _public_opener.open(req, timeout=5) as r:  # checks the connected address again (and on redirects)
                 return r.read(MAX_COVER + 1)[:MAX_COVER]
         else:
             path = os.path.join(WEB_DIR or "", src)
