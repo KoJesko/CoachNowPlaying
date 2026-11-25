@@ -415,8 +415,9 @@ void LoadHidden() {
         int used = 0;
         if (swscanf(p, L" %dx%d@%d,%d,%d,%d/s%d,%d,%d,%d/o%d/p%d,%d,%d,%d%n", &d.rtW, &d.rtH, &d.x, &d.y, &d.w, &d.h, &d.sx,
                     &d.sy, &d.sw, &d.sh, &d.ord, &d.px0, &d.py0, &d.px1, &d.py1, &used) == 15 && used > 0) {
-            g_hidden.push_back(d);
-            if (d.ord >= 0) g_useOrder = true;
+            // Only displays known by their position: an entry without one (from older builds) would match every display
+            // before the positions are in, hide them all and so stop the fit from ever measuring one.
+            if (d.px1 > d.px0 && d.py1 > d.py0) g_hidden.push_back(d);
             p += used;
         } else {
             ++p;
@@ -430,6 +431,7 @@ bool IsHidden(const ScreenDraw& d) { return std::find(g_hidden.begin(), g_hidden
 void SaveHidden() {
     std::wstring v;
     for (const ScreenDraw& d : g_hidden) {
+        if (!(d.px1 > d.px0 && d.py1 > d.py0)) continue;  // see LoadHidden
         wchar_t one[128];
         swprintf(one, 128, L"%s%dx%d@%d,%d,%d,%d/s%d,%d,%d,%d/o%d/p%d,%d,%d,%d", v.empty() ? L"" : L",", d.rtW, d.rtH, d.x,
                  d.y, d.w, d.h, d.sx, d.sy, d.sw, d.sh, d.ord, d.px0, d.py0, d.px1, d.py1);
@@ -774,7 +776,8 @@ bool ScreenDrawHidden(ID3D11DeviceContext* ctx, UINT start, INT base) {
              d.rtW, d.rtH, d.x, d.y, d.w, d.h, d.sx, d.sy, d.sw, d.sh, d.ord, d.px0, d.py0, d.px1, d.py1,
              IsHidden(d) ? "game picture, gps_takeover_hide" : "CarPlay");
     }
-    const bool hidden = !g_hidden.empty() && IsHidden(d);
+    // Hidden only once the display is known by its position (see LoadHidden).
+    const bool hidden = ql.ok && d.px1 > d.px0 && !g_hidden.empty() && IsHidden(d);
     if (!hidden) g_carplayDrawn = true;
     if (!hidden && ql.ok && d.px1 > d.px0) {  // the CarPlay display: overlays drawn after it inside this rectangle go
         g_carplayRectOk = true;
