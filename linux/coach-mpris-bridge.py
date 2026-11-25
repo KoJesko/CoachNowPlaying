@@ -35,6 +35,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -57,6 +58,9 @@ SONG_MAX_AGE = 240         # a recognised song is shown for at most this long wi
 GENRE_INTERVAL_NEW = 60    # stations with their own song titles: Shazam check for the genre until it's known...
 GENRE_INTERVAL = 300       # ...then every 5 minutes
 TALK_INTERVAL = 120        # once a station is known to be talk, check less often (music may come back)
+COVER_FIRST_DELAY = 10     # stations with their own song titles: Shazam this long after a new title, for the cover...
+COVER_RETRY = 20           # ...again after this long if it heard something else (ad, DJ)...
+COVER_TRIES = 3            # ...at most this many times per song
 MODEL_DIR = os.environ.get("CNP_MODEL_DIR") or os.path.expanduser("~/.local/share/coach-mpris-bridge/model/yamnet-onnx-float")
 
 LOCAL_RADIO = (os.environ.get("LOCAL_RADIO_URL") or "http://127.0.0.1:8330").rstrip("/")
@@ -322,6 +326,53 @@ def is_north_korea(st):
 SONG_RE = re.compile(r"^\s*(?P<artist>[^-–]+?)\s+[-–]\s+(?P<title>.+?)\s*$")
 
 
+_FOLD = str.maketrans({"ø": "o", "Ø": "o", "æ": "ae", "Æ": "ae", "ß": "ss", "þ": "th", "Þ": "th", "ð": "d", "Ð": "d",
+                       "đ": "d", "Đ": "d", "ł": "l", "Ł": "l", "œ": "oe", "Œ": "oe"})
+
+
+def _song_key(text):
+    """Lower case, accents and brackets ("(feat. ...)", "[Radio Edit]") removed, only letters and digits.
+    Letters that don't decompose (ø æ ß þ ð ł) are spelled out, so "Røyksopp" matches Shazam's "Royksopp"."""
+    text = unicodedata.normalize("NFKD", (text or "").translate(_FOLD))
+    text = "".join(c for c in text if not unicodedata.combining(c)).lower()
+    text = re.sub(r"[(\[].*?[)\]]|\b(feat|ft|featuring)\b.*", " ", text)
+    return re.sub(r"[^0-9a-zЀ-ӿͰ-Ͽ]+", "", text)
+
+
+_ARTIST_SPLIT = re.compile(r"\s*(?:,|&|\bx\b|\band\b|\bog\b|\bund\b|/|\+)\s*", re.I)
+
+
+def same_song(stream_song, shazam_song):
+    """True if Shazam heard the song the station's stream title names: same title, and the artists overlap
+    (stations write "A & B" / "A x B" where Shazam writes "A, B")."""
+    (s_artist, s_title), (z_artist, z_title) = stream_song, shazam_song
+    t1, t2 = _song_key(s_title), _song_key(z_title)
+    if not t1 or not t2 or not (t1 == t2 or (min(len(t1), len(t2)) >= 5 and (t1 in t2 or t2 in t1))):
+        return False
+    a1, a2 = _song_key(s_artist), _song_key(z_artist)
+    first1 = _song_key(_ARTIST_SPLIT.split(s_artist or "")[0])
+    first2 = _song_key(_ARTIST_SPLIT.split(z_artist or "")[0])
+    return bool(a1 and a2 and (a1 == a2 or (first1 and first1 in a2) or (first2 and first2 in a1)))
+
+
+ART_KEYS = ("imageUrl", "image", "imageURL", "artworkUrl", "artwork", "coverUrl", "cover", "albumArt")
+
+
+def icy_art(meta):
+    """Cover image address from an ICY metadata block's StreamUrl, or None."""
+    m = re.search(r"StreamUrl='(\{.*\})';", meta, re.S) or re.search(r"StreamUrl='(.*?)';", meta, re.S)
+    value = m.group(1).strip() if m else ""
+    if value.startswith("{"):
+        try:
+            data = json.loads(value)
+        except ValueError:
+            return None
+        value = next((data[k] for k in ART_KEYS if isinstance(data.get(k), str) and data[k]), "")
+    elif not re.search(r"\.(jpe?g|png|webp)(\?|$)", value, re.I):
+        return None  # a plain link to the station's website, not a picture
+    return value if value.startswith(("http://", "https://")) else None
+
+
 def split_song(text, station):
     """('artist', 'title') if an ICY title looks like a song, else None (station/show names, slogans, URLs)."""
     t = (text or "").strip()
@@ -350,6 +401,10 @@ class LocalRadioSong:
         self.pid = None
         self.active_until = 0.0
         self.icy = None          # (artist, title) or None
+        self.icy_since = 0.0     # when the stream title last changed to a new song
+        self.icy_cover = None    # (artist, title) of the stream song -> cover_url, from a Shazam match of the same song
+        self.icy_art = None      # (artist, title) -> cover_url the station itself sends with the title (StreamUrl)
+        self.cover_tries = 0     # Shazam attempts for the current stream song's cover
         self.rec = None          # (artist, title, cover_url, when)
         self.prof = {}           # station -> {"genres": {}, "clips": [speech bools], "misses": n, "hits": n}
         self.last_icy = 0.0
@@ -407,10 +462,17 @@ class LocalRadioSong:
     def song(self):
         """(artist, title, cover_url or None, source) or None."""
         with self.cv:
-            if self.icy:
-                return self.icy[0], self.icy[1], None, "stream"
+            if self.icy:  # the station's own song info; cover from the station, else Shazam (when it heard the same song)
+                return self.icy[0], self.icy[1], self.stream_cover(), "stream"
             if self.rec and time.time() - self.rec[3] < SONG_MAX_AGE:
                 return self.rec[0], self.rec[1], self.rec[2], "songrec"
+        return None
+
+    def stream_cover(self):
+        """Cover for the current stream song: the station's own artwork first, then a Shazam match. Call with cv held."""
+        for pair in (self.icy_art, self.icy_cover):
+            if pair and pair[0] == self.icy:
+                return pair[1]
         return None
 
     def run(self):
@@ -422,19 +484,30 @@ class LocalRadioSong:
                 url, station, pid = self.url, self.station, self.pid
                 due_icy = time.monotonic() - self.last_icy > ICY_INTERVAL
             if due_icy:
-                icy = self.read_icy(url) if url.startswith(("http://", "https://")) else ""
+                icy, art = self.read_icy(url) if url.startswith(("http://", "https://")) else ("", None)
                 with self.cv:
                     if url == self.url:
                         self.last_icy = time.monotonic()
                         song = split_song(icy, station)
                         if song != self.icy:
                             log(f"stream title: {icy!r} -> {'song' if song else 'not a song'}")
+                            self.icy_since = time.monotonic()
+                            self.cover_tries = 0
                         self.icy = song
+                        if song and art and self.icy_art != (song, art):
+                            log(f"cover for stream song {song[0]} - {song[1]} from the station")
+                            self.icy_art = (song, art)
             talk = self.kind(station) == "talk"
             with self.cv:
                 since = time.monotonic() - self.last_rec
-                if self.icy and not talk:  # the stream names the song; Shazam only to learn the genre
+                if self.icy and not talk:  # the stream names the song; Shazam only for its cover and the genre
                     need_rec = since > (GENRE_INTERVAL if self.profile(station)["genres"] else GENRE_INTERVAL_NEW)
+                    has_cover = self.stream_cover() is not None
+                    if not has_cover and self.cover_tries < COVER_TRIES:
+                        wait = COVER_FIRST_DELAY if self.cover_tries == 0 else COVER_RETRY
+                        need_rec = need_rec or (time.monotonic() - self.icy_since > wait and since > wait)
+                    if need_rec:
+                        self.cover_tries += 1
                 else:
                     need_rec = since > (TALK_INTERVAL if talk else RECOGNIZE_INTERVAL)
                 need_rec = need_rec and url == self.url
@@ -455,6 +528,10 @@ class LocalRadioSong:
                             if genre:
                                 p["genres"][genre] = p["genres"].get(genre, 0) + 1
                         self.rec = (artist, title, cover, time.time())
+                        if self.icy and cover and same_song(self.icy, (artist, title)):
+                            if not self.stream_cover():
+                                log(f"cover for stream song {self.icy[0]} - {self.icy[1]} from Shazam")
+                            self.icy_cover = (self.icy, cover)
                     elif found is None and speech is not ...:
                         p["misses"] += 1
                         if speech is not None:
@@ -467,17 +544,19 @@ class LocalRadioSong:
 
     @staticmethod
     def read_icy(url):
+        """(stream title, cover_url or None). Some stations (e.g. P11 Dance) put the song's artwork in StreamUrl,
+        either as JSON ({"imageUrl": ...}) or as a bare image address."""
         try:
             req = urllib.request.Request(url, headers={"Icy-MetaData": "1", "User-Agent": "VLC/3.0.20 LibVLC/3.0.20"})
             with urllib.request.urlopen(req, timeout=8) as r:
                 metaint = int(r.headers.get("icy-metaint") or 0)
                 if not metaint or metaint > 256 * 1024:
-                    return ""
+                    return "", None
                 r.read(metaint)
                 n = r.read(1)
                 raw = r.read(n[0] * 16) if n else b""
         except (OSError, ValueError):
-            return ""
+            return "", None
         for enc in ("utf-8", "latin-1"):
             try:
                 text = raw.decode(enc)
@@ -485,7 +564,7 @@ class LocalRadioSong:
             except UnicodeDecodeError:
                 continue
         m = re.search(r"StreamTitle='(.*?)';", text, re.S)
-        return m.group(1).strip() if m else ""
+        return (m.group(1).strip() if m else ""), icy_art(text)
 
     def recognize(self, pid):
         """(song or None, speech True/False/None). speech is ... (Ellipsis) when nothing could be recorded."""
