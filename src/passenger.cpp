@@ -22,6 +22,9 @@ namespace {
 
 std::mutex g_mx;
 std::wstring g_source, g_dest;
+std::wstring g_busStop;           // coach job: next stop (empty = no coach job)
+int g_busStage = -1;
+bool g_busFinal = false;
 float g_plannedKm = 0.0f;
 std::string g_vehicle;
 std::atomic<bool> g_isCoach{false};
@@ -219,7 +222,15 @@ bool PickVoice(ISpVoice* voice, const wchar_t* lcid) {
     return ok;
 }
 
-std::wstring AnnounceText(const std::wstring& dest, int hour, bool german) {
+// finalStop = false: a coach stop along the line (the trip goes on), true: the end of the trip.
+std::wstring AnnounceText(const std::wstring& dest, int hour, bool german, bool finalStop) {
+    if (!finalStop && !dest.empty()) {
+        if (german)
+            return L"Sehr geehrte Fahrgäste, unser nächster Halt ist " + dest +
+                   L". Wir erreichen ihn in wenigen Minuten. Bitte bleiben Sie bis zum Halt angeschnallt.";
+        return L"Ladies and gentlemen, our next stop is " + dest +
+               L". We will arrive in a few minutes. Please stay seated with your seatbelt fastened until we stop.";
+    }
     if (german) {
         const wchar_t* wish = hour >= 5 && hour < 18 ? L"einen angenehmen Tag" : hour < 22 && hour >= 18 ? L"einen angenehmen Abend" : L"eine gute Nacht";
         return L"Sehr geehrte Fahrgäste, wir erreichen in wenigen Minuten " + (dest.empty() ? std::wstring(L"unser Ziel") : dest) +
@@ -230,7 +241,7 @@ std::wstring AnnounceText(const std::wstring& dest, int hour, bool german) {
            L" in a few minutes. Thank you for travelling with us, and have " + wish + L".";
 }
 
-void Speak(std::wstring dest, int hour) {
+void Speak(std::wstring dest, int hour, bool finalStop) {
     const Settings& st = GetSettings();
     const double gain = std::clamp(st.announceVolume, 0, 100) / 100.0;
     // 1) Piper (neural voice: German by default, English with language=en), with the coach sound
@@ -238,7 +249,7 @@ void Speak(std::wstring dest, int hour) {
         const bool german = st.announceLanguage != L"en";
         std::vector<double> voice;
         int rate = 22050;
-        const std::wstring text = AnnounceText(dest, hour, german);
+        const std::wstring text = AnnounceText(dest, hour, german, finalStop);
         if (PiperSay(text, german ? L"de" : L"en", voice, rate)) {
             std::vector<double> all = Ding(rate, 0.10);
             all.resize(all.size() + rate / 10, 0.0);
@@ -259,7 +270,7 @@ void Speak(std::wstring dest, int hour) {
     if (SUCCEEDED(CoCreateInstance(CLSID_SpVoice, nullptr, CLSCTX_ALL, IID_ISpVoice, reinterpret_cast<void**>(&voice)))) {
         const bool german = st.announceLanguage != L"en" && PickVoice(voice, L"407");
         if (!german) PickVoice(voice, L"409");
-        const std::wstring text = AnnounceText(dest, hour, german);
+        const std::wstring text = AnnounceText(dest, hour, german, finalStop);
         voice->SetVolume(static_cast<USHORT>(std::clamp(st.announceVolume, 0, 100)));
         voice->SetRate(-1);
         Logf("ANNOUNCE (Windows %s voice): %ls", german ? "German" : "English", text.c_str());
@@ -279,6 +290,17 @@ void PaxSetJob(const std::string& sourceCity, const std::string& destinationCity
     g_dest = ToWide(destinationCity);
     g_plannedKm = plannedKm;
     Logf("PAX job: '%s' -> '%s', %.0f km", sourceCity.c_str(), destinationCity.c_str(), plannedKm);
+}
+
+void PaxSetBusStop(const std::string& nextStop, int stage, bool finalStop) {
+    std::lock_guard<std::mutex> lock(g_mx);
+    const std::wstring stop = ToWide(nextStop);
+    if (stop == g_busStop && stage == g_busStage && finalStop == g_busFinal) return;  // the game re-sends the config
+    g_busStop = stop;
+    g_busStage = stop.empty() ? -1 : stage;
+    g_busFinal = finalStop;
+    if (stop.empty()) Logf("PAX coach job: none");
+    else Logf("PAX coach job: stage %d -> '%s'%s", stage, nextStop.c_str(), finalStop ? " (final stop)" : "");
 }
 
 void PaxSetVehicle(const std::string& idText) {
@@ -303,7 +325,7 @@ PaxView PaxGetView(uint32_t gameMinutes, bool haveTime, float navSeconds, float 
     {
         std::lock_guard<std::mutex> lock(g_mx);
         v.source = g_source;
-        v.destination = g_dest;
+        v.destination = g_busStop.empty() ? g_dest : g_busStop;  // coach job: the TV shows the next stop
         planned = g_plannedKm;
     }
     if (planned > 0.5f && navMeters > 0.0f) v.progress = std::clamp(1.0f - navMeters / (planned * 1000.0f), 0.0f, 1.0f);
@@ -319,11 +341,20 @@ void PaxTick(uint32_t gameMinutes, float navSeconds, float navMeters) {
     const Settings& st = GetSettings();
     if (!st.announce || !g_isCoach.load()) return;
     std::wstring dest;
+    bool finalStop = true;
+    int stage = -1;
     {
         std::lock_guard<std::mutex> lock(g_mx);
-        dest = g_dest;
+        if (!g_busStop.empty()) {  // coach job: announce each stop by name
+            dest = g_busStop;
+            stage = g_busStage;
+            finalStop = g_busFinal;
+        } else {
+            dest = g_dest;
+        }
     }
-    const std::wstring routeKey = dest.empty() ? L"(route)" : dest;
+    // the stage number keeps a stop that comes twice on a line (a loop back to the start) from being skipped
+    const std::wstring routeKey = (dest.empty() ? std::wstring(L"(route)") : dest) + L"#" + std::to_wstring(stage);
     if (navSeconds <= 0.0f || navMeters <= 0.0f) {  // no route (arrived / cleared): next route may announce again
         g_announcedFor.clear();
         g_armed = false;
@@ -339,8 +370,8 @@ void PaxTick(uint32_t gameMinutes, float navSeconds, float navMeters) {
     if (g_speaking.exchange(true)) return;
     g_announcedFor = routeKey;
     const int hour = static_cast<int>((gameMinutes % 1440u) / 60u);
-    Logf("ANNOUNCE %.0f s (real) / %.0f m before '%ls'", left, navMeters, routeKey.c_str());
-    std::thread(Speak, dest, hour).detach();
+    Logf("ANNOUNCE %.0f s (real) / %.0f m before '%ls'%s", left, navMeters, routeKey.c_str(), finalStop ? " (final)" : "");
+    std::thread(Speak, dest, hour, finalStop).detach();
 }
 
 // ---- TV picture ----------------------------------------------------------------------------------------------------

@@ -247,6 +247,23 @@ SCSAPI_VOID OnConfiguration(const scs_event_t, const void* const info, const scs
                 km = static_cast<float>(NumberOf(a->value));
         }
         ep::PaxSetJob(src, dst, km);  // empty attribute set = no job
+    } else if (strcmp(c->id, "bus_job") == 0) {
+        // Coaches DLC. Not in the SDK headers: bus.stages.count / bus.stages.current, and per stage index
+        // destination_stop.name etc. The config is re-sent at every stop with stages.current + 1. It is empty
+        // when there is no coach job (also briefly while a save loads). The last stage never counts past itself.
+        int count = 0, current = -1;
+        for (const scs_named_value_t* a = c->attributes; a && a->name; ++a) {
+            if (strcmp(a->name, "bus.stages.count") == 0) count = static_cast<int>(NumberOf(a->value));
+            else if (strcmp(a->name, "bus.stages.current") == 0) current = static_cast<int>(NumberOf(a->value));
+        }
+        std::string next;
+        for (const scs_named_value_t* a = c->attributes; a && a->name; ++a) {
+            if (current >= 0 && a->index == static_cast<scs_u32_t>(current) &&
+                strcmp(a->name, "destination_stop.name") == 0 && a->value.type == SCS_VALUE_TYPE_string &&
+                a->value.value_string.value)
+                next = a->value.value_string.value;
+        }
+        ep::PaxSetBusStop(next, current, count > 0 && current == count - 1);
     }
 }
 

@@ -12,6 +12,9 @@ namespace ep {
 //  - a few minutes before arrival a chime plays and a voice announces the destination (Windows speech, SAPI)
 // Telemetry input:
 void PaxSetJob(const std::string& sourceCity, const std::string& destinationCity, float plannedKm);  // empty = no job
+// Coach job (bus_job config, Coaches DLC): the stop the bus is driving to now. Empty name = no coach job.
+// stage = bus.stages.current, finalStop = this is the last stage of the line.
+void PaxSetBusStop(const std::string& nextStop, int stage, bool finalStop);
 void PaxSetVehicle(const std::string& idText);  // brand id + id + name of the player's vehicle
 void PaxSetTimeScale(float scale);              // in-game seconds per real second
 

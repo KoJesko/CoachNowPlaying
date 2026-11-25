@@ -73,6 +73,12 @@ The installer:
 
 Copy the `CoachNowPlaying_piper` folder from the upstream release ZIP too if you want the voice announcements.
 
+### Announcements on coach jobs
+
+On a Coaches DLC job this build reads the game's `bus_job` data and announces **every stop by name** a few minutes
+before it ("our next stop is Egilsstaðir…"), and the end of the trip at the last stop. The passenger TV shows the next
+stop. Upstream only knew the freight job, so it said "our destination" before whatever the GPS pointed at.
+
 ### English announcements
 
 This build picks the Piper voice by language: `voice/de_*.onnx` for German (Thorsten, in the upstream ZIP) and
