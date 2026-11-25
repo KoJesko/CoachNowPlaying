@@ -26,16 +26,19 @@ rsvg-convert for SVG station logos.
 
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -358,6 +361,39 @@ def same_song(stream_song, shazam_song):
 ART_KEYS = ("imageUrl", "image", "imageURL", "artworkUrl", "artwork", "coverUrl", "cover", "albumArt")
 
 
+# Image addresses taken from radio stream metadata: whoever runs a station chooses them, so they are only fetched from
+# public internet hosts (never this computer or the home network), redirects included.
+_untrusted_urls = set()
+
+
+def public_host(url):
+    """True if every address the URL's host resolves to is a public internet address."""
+    host = urllib.parse.urlsplit(url).hostname
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        try:
+            if not ipaddress.ip_address(info[4][0].split("%")[0]).is_global:
+                return False
+        except ValueError:
+            return False
+    return bool(infos)
+
+
+class _PublicRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not newurl.startswith(("http://", "https://")) or not public_host(newurl):
+            raise urllib.error.URLError(f"redirect to a non-public address refused: {newurl[:80]}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_public_opener = urllib.request.build_opener(_PublicRedirects)
+
+
 def icy_art(meta):
     """Cover image address from an ICY metadata block's StreamUrl, or None."""
     m = re.search(r"StreamUrl='(\{.*\})';", meta, re.S) or re.search(r"StreamUrl='(.*?)';", meta, re.S)
@@ -370,7 +406,12 @@ def icy_art(meta):
         value = next((data[k] for k in ART_KEYS if isinstance(data.get(k), str) and data[k]), "")
     elif not re.search(r"\.(jpe?g|png|webp)(\?|$)", value, re.I):
         return None  # a plain link to the station's website, not a picture
-    return value if value.startswith(("http://", "https://")) else None
+    if not value.startswith(("http://", "https://")):
+        return None
+    if len(_untrusted_urls) > 500:
+        _untrusted_urls.clear()
+    _untrusted_urls.add(value)
+    return value
 
 
 def split_song(text, station):
@@ -670,7 +711,14 @@ def _load_image(src):
             return base64.b64decode(data) if ";base64" in header else urllib.parse.unquote_to_bytes(data)
         elif src.startswith(("http://", "https://")):
             req = urllib.request.Request(src, headers={"User-Agent": "coach-mpris-bridge"})
-            with urllib.request.urlopen(req, timeout=5) as r:
+            if src in _untrusted_urls:  # from a station's stream metadata: public hosts only
+                if not public_host(src):
+                    log(f"cover: refusing station artwork on a non-public address: {src[:80]}")
+                    return None
+                opener = _public_opener.open
+            else:
+                opener = urllib.request.urlopen
+            with opener(req, timeout=5) as r:
                 return r.read(MAX_COVER + 1)[:MAX_COVER]
         else:
             path = os.path.join(WEB_DIR or "", src)
