@@ -125,16 +125,17 @@ std::wstring PluginDir() {
     return s == std::wstring::npos ? L"." : p.substr(0, s);
 }
 
-// Piper (neural text-to-speech, offline): <plugins>\CoachNowPlaying_piper\piper.exe + voice\*.onnx
-bool PiperSay(const std::wstring& text, std::vector<double>& out, int& rate) {
+// Piper (neural text-to-speech, offline): <plugins>\CoachNowPlaying_piper\piper.exe + voice\<lang>_*.onnx
+// lang is the Piper voice prefix ("de", "en"): de_DE-thorsten-high.onnx, en_US-ryan-high.onnx, ...
+bool PiperSay(const std::wstring& text, const wchar_t* lang, std::vector<double>& out, int& rate) {
     const std::wstring dir = PluginDir() + L"\\CoachNowPlaying_piper";
     const std::wstring exe = dir + L"\\piper.exe";
     if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
     std::wstring model;
     WIN32_FIND_DATAW fd;
-    HANDLE f = FindFirstFileW((dir + L"\\voice\\*.onnx").c_str(), &fd);
+    HANDLE f = FindFirstFileW((dir + L"\\voice\\" + lang + L"_*.onnx").c_str(), &fd);
     if (f != INVALID_HANDLE_VALUE) { model = dir + L"\\voice\\" + fd.cFileName; FindClose(f); }
-    if (model.empty()) { Logf("ANNOUNCE piper found but no voice (*.onnx) in CoachNowPlaying_piper\\voice"); return false; }
+    if (model.empty()) { Logf("ANNOUNCE piper found but no %ls voice (%ls_*.onnx) in CoachNowPlaying_piper\\voice", lang, lang); return false; }
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
     const std::wstring wav = std::wstring(tmp) + L"CoachNowPlaying_announce.wav";
@@ -232,12 +233,13 @@ std::wstring AnnounceText(const std::wstring& dest, int hour, bool german) {
 void Speak(std::wstring dest, int hour) {
     const Settings& st = GetSettings();
     const double gain = std::clamp(st.announceVolume, 0, 100) / 100.0;
-    // 1) Piper (neural voice, German), with the coach sound
-    if (st.announceLanguage != L"en") {
+    // 1) Piper (neural voice: German by default, English with language=en), with the coach sound
+    {
+        const bool german = st.announceLanguage != L"en";
         std::vector<double> voice;
         int rate = 22050;
-        const std::wstring text = AnnounceText(dest, hour, true);
-        if (PiperSay(text, voice, rate)) {
+        const std::wstring text = AnnounceText(dest, hour, german);
+        if (PiperSay(text, german ? L"de" : L"en", voice, rate)) {
             std::vector<double> all = Ding(rate, 0.10);
             all.resize(all.size() + rate / 10, 0.0);
             std::vector<double> bus = BusSound(voice, rate);

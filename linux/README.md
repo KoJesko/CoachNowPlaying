@@ -73,6 +73,20 @@ The installer:
 
 Copy the `CoachNowPlaying_piper` folder from the upstream release ZIP too if you want the voice announcements.
 
+### English announcements
+
+This build picks the Piper voice by language: `voice/de_*.onnx` for German (Thorsten, in the upstream ZIP) and
+`voice/en_*.onnx` for English. No English voice ships with it. Download one into `CoachNowPlaying_piper/voice/`,
+both the `.onnx` and the `.onnx.json` file, for example "Ryan" (high quality, US English, CC BY-NC-SA 4.0, so not
+included here):
+
+- [en_US-ryan-high.onnx](https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/high/en_US-ryan-high.onnx)
+- [en_US-ryan-high.onnx.json](https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/high/en_US-ryan-high.onnx.json)
+
+Other voices: [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices/tree/v1.0.0/en). Then set
+`[announce] language=en` in the INI. Without an English Piper voice, `language=en` falls back to the Windows speech
+voice. Under Proton that needs the Steam tool "Proton Voice Files" (`steam://install/3086180`).
+
 For Local Radio, use the Linux port linked above (it tells the bridge which station plays). With **Plasma browser
 integration** (KDE) the bridge also sees the stream address and can use the station's own song titles; without it,
 songs are identified with SongRec only.
