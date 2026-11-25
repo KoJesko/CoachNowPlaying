@@ -2,6 +2,8 @@
 
 #include "cover_lookup.h"
 #include "d3d11_hooks.h"
+#include "eta_screen.h"
+#include "passenger.h"
 #include "log.h"
 #include "media.h"
 #include "radio_tracker.h"
@@ -172,7 +174,15 @@ private:
     void DrawMedia(const MediaSnapshot& m, double t);
     void DrawRadio(const RadioSnapshot& r, double t);
     void DrawIdle(double t);
+    void DrawTrip();
+    void DrawMapBar(const RadioSnapshot* radio, const MediaSnapshot* media);
     void CopyOut();
+
+public:
+    int page_ = kPageMusic;
+    int bar_[4] = {0, 0, 0, 0};  // the map page's bar in texture pixels (x0 y0 x1 y1), empty = none
+
+private:
 
     ComPtr<ID2D1Factory> d2d_;
     ComPtr<IDWriteFactory> dw_;
@@ -669,6 +679,112 @@ void Renderer::DrawIdle(double t) {
     (void)t;
 }
 
+// Trip page (GPS takeover): arrival as a clock time, what is left, the next stop and the speed limit.
+void Renderer::DrawTrip() {
+    SetCover(nullptr, 1ull << 61);
+    const D2D1_COLOR_F target = Rgb(0.16f, 0.32f, 0.52f);
+    accent_.r = Lerp(accent_.r, target.r, 0.12f);
+    accent_.g = Lerp(accent_.g, target.g, 0.12f);
+    accent_.b = Lerp(accent_.b, target.b, 0.12f);
+    Background(accent_);
+    DrawClock();
+    const TripInfo trip = EtaGetTrip();
+    const PaxView pax = PaxGetView(trip.gameMinutes, trip.haveTime, trip.navSeconds, trip.navMeters);
+    const bool route = trip.navSeconds > 0 && trip.navMeters > 0;
+    Text(L"TRIP", 40, 24, 300, 30, 21, DWRITE_FONT_WEIGHT_SEMI_BOLD, Rgb(0.55f, 0.78f, 1.0f, 0.95f));
+
+    // Speed limit sign (km/h, like the road signs), mph underneath.
+    const D2D1_POINT_2F c = D2D1::Point2F(140, 250);
+    const bool limit = trip.speedLimit >= 0.5f;
+    brush_->SetColor(limit ? Rgb(1, 1, 1) : Rgb(1, 1, 1, 0.12f));
+    rt_->FillEllipse(D2D1::Ellipse(c, 92, 92), brush_.Get());
+    brush_->SetColor(limit ? Rgb(0.86f, 0.1f, 0.1f) : Rgb(1, 1, 1, 0.3f));
+    rt_->DrawEllipse(D2D1::Ellipse(c, 84, 84), brush_.Get(), 16);
+    wchar_t buf[64];
+    if (limit) swprintf(buf, 64, L"%d", static_cast<int>(std::lround(trip.speedLimit * 3.6f)));
+    else swprintf(buf, 64, L"--");
+    Text(buf, c.x - 80, c.y - 46, 160, 92, 70, DWRITE_FONT_WEIGHT_BOLD, limit ? Rgb(0.08f, 0.08f, 0.1f) : Rgb(1, 1, 1, 0.5f),
+         false, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    if (limit) {
+        swprintf(buf, 64, L"%d mph", static_cast<int>(std::lround(trip.speedLimit * 2.23694f)));
+        Text(buf, c.x - 100, c.y + 100, 200, 34, 24, DWRITE_FONT_WEIGHT_NORMAL, Rgb(1, 1, 1, 0.7f), false,
+             DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
+
+    // Arrival, what is left, next stop.
+    const float x0 = 290, w = std::max(200.0f, canvasW_ - x0 - 40);
+    Text(L"Arrival", x0, 70, w, 32, 24, DWRITE_FONT_WEIGHT_NORMAL, Rgb(1, 1, 1, 0.65f));
+    std::wstring eta, plus;
+    EtaArrivalText(eta, plus);
+    Text(eta + (plus.empty() ? L"" : L"  " + plus), x0, 98, w, 100, 84, DWRITE_FONT_WEIGHT_SEMI_BOLD, Rgb(1, 1, 1));
+    if (route) {
+        const int mins = static_cast<int>(trip.navSeconds / 60.0f);
+        const float km = trip.navMeters / 1000.0f, mi = trip.navMeters / 1609.344f;
+        if (mins >= 60) swprintf(buf, 64, L"%.0f km \u00B7 %.0f mi \u00B7 %d h %02d min", km, mi, mins / 60, mins % 60);
+        else swprintf(buf, 64, L"%.0f km \u00B7 %.0f mi \u00B7 %d min", km, mi, mins);
+    } else {
+        swprintf(buf, 64, L"No route");
+    }
+    Text(buf, x0, 206, w, 44, 32, DWRITE_FONT_WEIGHT_NORMAL, Rgb(1, 1, 1, 0.88f));
+    if (!pax.destination.empty()) {
+        Text(pax.source.empty() ? L"Destination" : L"Next stop", x0, 270, w, 32, 24, DWRITE_FONT_WEIGHT_NORMAL,
+             Rgb(1, 1, 1, 0.65f));
+        Text(pax.destination, x0, 300, w, 50, 38, DWRITE_FONT_WEIGHT_SEMI_BOLD, Rgb(1, 1, 1));
+    }
+    if (pax.progress >= 0) {
+        const float py = 384, pw = w;
+        Fill(D2D1::RoundedRect(D2D1::RectF(x0, py, x0 + pw, py + 10), 5, 5), Rgb(1, 1, 1, 0.18f));
+        Fill(D2D1::RoundedRect(D2D1::RectF(x0, py, x0 + std::max(pw * pax.progress, 10.0f), py + 10), 5, 5),
+             Rgb(0.45f, 0.75f, 1.0f));
+    }
+}
+
+// Map page (GPS takeover): the game's map stays, only this bar along the bottom is ours. It is opaque (it replaces the
+// map's pixels there) and its rectangle in texture pixels goes with the frame.
+void Renderer::DrawMapBar(const RadioSnapshot* radio, const MediaSnapshot* media) {
+    bar_[0] = bar_[1] = bar_[2] = bar_[3] = 0;
+    std::wstring line1, line2;
+    if (media) {
+        SetCover(media->cover, media->coverSerial);
+        line1 = ToWide(media->title);
+        line2 = ToWide(media->artist);
+    } else if (radio) {
+        std::wstring artist, song;
+        SplitArtistTitle(Trim(radio->title), artist, song);
+        line1 = song.empty() ? ToWide(radio->stationName.empty() ? radio->icyName : radio->stationName) : song;
+        line2 = artist.empty() ? ToWide(radio->stationName) : artist;
+        SetCover(nullptr, 1ull << 60);
+    } else {
+        return;  // nothing playing: the plain map
+    }
+    const float h = 86, y0 = canvasH_ - h;
+    rt_->SetTransform(uiTransform_);
+    Fill(D2D1::RoundedRect(D2D1::RectF(0, y0, canvasW_, canvasH_), 0, 0), Rgb(0.06f, 0.07f, 0.09f));
+    Fill(D2D1::RoundedRect(D2D1::RectF(0, y0, canvasW_, y0 + 3), 0, 0), Rgb(accent_.r, accent_.g, accent_.b));
+    float tx = 24;
+    if (media && cover_) {
+        DrawCover(16, y0 + 9, 68);
+        tx = 100;
+    }
+    Text(line1, tx, y0 + 10, canvasW_ - tx - 150, 40, 30, DWRITE_FONT_WEIGHT_SEMI_BOLD, Rgb(1, 1, 1));
+    Text(line2, tx, y0 + 48, canvasW_ - tx - 150, 32, 22, DWRITE_FONT_WEIGHT_NORMAL, Rgb(1, 1, 1, 0.75f));
+    Text(Clock(), canvasW_ - 140, y0 + 24, 120, 40, 28, DWRITE_FONT_WEIGHT_NORMAL, Rgb(1, 1, 1, 0.8f), false,
+         DWRITE_TEXT_ALIGNMENT_TRAILING);
+    rt_->SetTransform(drawTransform_);
+    // The bar's rectangle in texture pixels (the transform may rotate or mirror it).
+    float xs[4], ys[4];
+    const D2D1_POINT_2F corners[4] = {{0, y0}, {canvasW_, y0}, {0, canvasH_}, {canvasW_, canvasH_}};
+    for (int i = 0; i < 4; ++i) {
+        const D2D1_POINT_2F p = uiTransform_.TransformPoint(corners[i]);
+        xs[i] = p.x;
+        ys[i] = p.y;
+    }
+    bar_[0] = std::clamp(static_cast<int>(std::floor(*std::min_element(xs, xs + 4))), 0, static_cast<int>(kScreenWidth));
+    bar_[1] = std::clamp(static_cast<int>(std::floor(*std::min_element(ys, ys + 4))), 0, static_cast<int>(kScreenHeight));
+    bar_[2] = std::clamp(static_cast<int>(std::ceil(*std::max_element(xs, xs + 4))), 0, static_cast<int>(kScreenWidth));
+    bar_[3] = std::clamp(static_cast<int>(std::ceil(*std::max_element(ys, ys + 4))), 0, static_cast<int>(kScreenHeight));
+}
+
 void Renderer::CopyOut() {
     ComPtr<IWICBitmapLock> lock;
     WICRect rc{0, 0, static_cast<INT>(kScreenWidth), static_cast<INT>(kScreenHeight)};
@@ -716,7 +832,24 @@ void Renderer::Frame(double t) {
     drawTransform_ = D2D1::Matrix3x2F::Translation(0, fit.valid ? static_cast<float>(fit.designOffsetY) : 0.0f) * uiTransform_;
     rt_->SetTransform(drawTransform_);
     bool buttons = false;
-    if (radio.active) DrawRadio(radio, t);
+    page_ = GetSettings().gpsTakeover ? TakeoverPage() : kPageMusic;
+    bar_[0] = bar_[1] = bar_[2] = bar_[3] = 0;
+#ifndef _MSC_VER
+    const MediaSnapshot pageMedia = page_ == kPageMap ? MediaGetSnapshot() : MediaSnapshot{};
+#endif
+    if (page_ == kPageTrip) DrawTrip();
+    else if (page_ == kPageMap) {
+        const RadioSnapshot* r = radio.active ? &radio : holdRadio ? &lastRadio_ : nullptr;
+        const MediaSnapshot* m = nullptr;
+#ifndef _MSC_VER
+        if (!r && pageMedia.hasSession && pageMedia.playing && !pageMedia.title.empty()) m = &pageMedia;
+#endif
+        rt_->SetTransform(D2D1::Matrix3x2F::Identity());
+        rt_->Clear(D2D1::ColorF(0, 0, 0, 1));
+        rt_->SetTransform(drawTransform_);
+        DrawMapBar(r, m);
+    }
+    else if (radio.active) DrawRadio(radio, t);
     else if (holdRadio) DrawRadio(lastRadio_, t);
 #ifndef _MSC_VER
     // Linux build: the in-game radio wins; otherwise whatever the system plays (Local Radio, Spotify, ...), drawn
@@ -741,12 +874,20 @@ void Renderer::Frame(double t) {
         return;
     }
     CopyOut();
+    // CopyOut flips the picture when there is no fit: the bar's rectangle flips with it.
+    if ((GetSettings().flipVertical != TakeoverFlip()) && !fitActive_ && bar_[3] > bar_[1]) {
+        const int y0 = static_cast<int>(kScreenHeight) - bar_[3], y1 = static_cast<int>(kScreenHeight) - bar_[1];
+        bar_[1] = y0;
+        bar_[3] = y1;
+    }
 }
 
 // --- frame hand-over ----------------------------------------------------------------------
 
 std::mutex g_frameMutex;
 std::vector<uint8_t> g_front;
+int g_frontPage = kPageMusic;
+int g_frontBar[4] = {0, 0, 0, 0};
 uint64_t g_version = 0;
 std::thread g_thread;
 std::atomic<bool> g_stop{false};
@@ -770,8 +911,11 @@ void Run() {
                     // caused small stutters.
                     const auto& px = renderer.Pixels();
                     std::lock_guard<std::mutex> lock(g_frameMutex);
-                    if (g_front.size() != px.size() || memcmp(g_front.data(), px.data(), px.size()) != 0) {
+                    const bool meta = g_frontPage != renderer.page_ || memcmp(g_frontBar, renderer.bar_, sizeof g_frontBar) != 0;
+                    if (meta || g_front.size() != px.size() || memcmp(g_front.data(), px.data(), px.size()) != 0) {
                         g_front = px;
+                        g_frontPage = renderer.page_;
+                        memcpy(g_frontBar, renderer.bar_, sizeof g_frontBar);
                         ++g_version;
                     }
                 }
@@ -807,6 +951,11 @@ bool RendererLockFrame(uint64_t afterVersion, FrameView* view) {
     view->height = kScreenHeight;
     view->pitch = kScreenWidth * 4;
     view->version = g_version;
+    view->page = g_frontPage;
+    view->barX0 = g_frontBar[0];
+    view->barY0 = g_frontBar[1];
+    view->barX1 = g_frontBar[2];
+    view->barY1 = g_frontBar[3];
     return true;
 }
 

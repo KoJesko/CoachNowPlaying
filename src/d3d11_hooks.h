@@ -13,4 +13,9 @@ void D3D11HooksDisable();
 // upside down (it is a flipped copy of the first), so the picture has to be drawn flipped as well.
 bool TakeoverFlip();
 
+// GPS takeover pages, like the mod's: the Infotainment button blanks the cab screen and brings it back; every time it
+// comes back (not after switching the power off) the next page shows. Map = the game's map with the now-playing bar.
+constexpr int kPageMap = 0, kPageMusic = 1, kPageTrip = 2, kPageCount = 3;
+int TakeoverPage();
+
 }  // namespace ep

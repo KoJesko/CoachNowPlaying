@@ -18,6 +18,10 @@ struct FrameView {
     uint32_t height = 0;
     uint32_t pitch = 0;
     uint64_t version = 0;
+    // GPS takeover pages (see TakeoverPage): on the map page only the now-playing bar is ours, the rest of the screen
+    // is the game's map. bar* is that bar's rectangle in texture pixels (empty: no bar, the plain map).
+    int page = 1;
+    int barX0 = 0, barY0 = 0, barX1 = 0, barY1 = 0;
 };
 
 // Starts the thread that draws the screen (Direct2D / DirectWrite into a CPU bitmap, ~15 fps).

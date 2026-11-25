@@ -475,7 +475,9 @@ void EtaSetGameTime(uint32_t minutes) {
     g_haveGameTime = true;
 }
 void EtaSetNavigationTime(float seconds) { g_navSeconds = seconds; }
+std::atomic<unsigned long long> g_electricOffTick{0};
 void EtaSetElectric(bool on) {
+    if (!on) g_electricOffTick = GetTickCount64();
     const int prev = g_electric.exchange(on ? 1 : 0);
     if (on && prev != 1) g_electricOnEvent = true;  // also the first value after loading: the bus comes alive
 }
@@ -488,6 +490,24 @@ void EtaSetPlate(const std::string& plate, const std::string& countryId) {
     Logf("PLATE telemetry: \"%s\" country \"%s\"", plate.c_str(), countryId.c_str());
 }
 void EtaSetSpeedLimit(float metersPerSecond) { g_speedLimit = metersPerSecond; }
+
+TripInfo EtaGetTrip() {
+    TripInfo t;
+    t.haveTime = g_haveGameTime.load();
+    t.gameMinutes = g_gameMinutes.load();
+    t.navSeconds = g_navSeconds.load();
+    t.navMeters = g_navMeters.load();
+    t.speedLimit = g_speedLimit.load();
+    return t;
+}
+
+void EtaArrivalText(std::wstring& main, std::wstring& suffix) {
+    main.clear();
+    suffix.clear();
+    EtaText(main, suffix);
+}
+
+unsigned long long EtaElectricOffTick() { return g_electricOffTick.load(); }
 
 bool EtaIsPlaceholder(const D3D11_TEXTURE2D_DESC* d) {
     return FieldForDesc(d) && d->ArraySize == 1 && d->MipLevels == 1 && d->SampleDesc.Count == 1 &&

@@ -149,7 +149,9 @@ void OnPlaceholderCreated(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& d, ID3D
     nd.Height = kScreenHeight;
     nd.MipLevels = 1;
     nd.ArraySize = 1;
-    nd.Format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
+    // GPS takeover: the same format family as the game's cab screen texture (RGBA8), so the map page can copy the game's
+    // map into ours on the GPU. The renderer's BGRA frames are converted when they are uploaded.
+    nd.Format = GetSettings().gpsTakeover ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_B8G8R8A8_TYPELESS;
     nd.SampleDesc.Count = 1;
     nd.Usage = D3D11_USAGE_DEFAULT;
     nd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -186,7 +188,8 @@ void OnPlaceholderViewCreated(ID3D11Device* dev, ID3D11ShaderResourceView* gameV
     bool srgb = desc && desc->Format != DXGI_FORMAT_UNKNOWN ? IsSrgbFormat(desc->Format) : g_placeholderSrgb;
 
     D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
-    vd.Format = srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (GetSettings().gpsTakeover) vd.Format = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    else vd.Format = srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM;
     vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     vd.Texture2D.MipLevels = 1;
     ID3D11ShaderResourceView* ours = nullptr;
@@ -218,6 +221,10 @@ struct GpsCand {
 unsigned g_gpsSeq = 0;
 std::vector<GpsCand> g_gps;            // under g_screenMx, in creation order
 std::atomic<bool> g_drawsReset{false};
+bool g_takeover = false;  // [screen] gps_takeover, cached for the draw hooks
+std::atomic<int> g_page{kPageMusic};  // GPS takeover page (see TakeoverPage)
+ULONGLONG g_shownPairTick = 0;        // when the screen texture now in use was made
+void OnScreenCameBack(ULONGLONG oldPairTick);
 std::atomic<bool> g_takeoverFlip{false};  // shown texture is the second of its pair (a flipped copy of the first)  // a new screen texture: the displays drawn from it are found again
 ID3D11Texture2D* g_gpsShown = nullptr;  // candidate showing our picture, nullptr = none
 bool g_gpsOff = false;                 // switched off with Ctrl+Shift+F10: the stock screen stays until switched on
@@ -300,7 +307,10 @@ void OnGpsTargetCreated(const D3D11_TEXTURE2D_DESC& d, ID3D11Texture2D* tex) {
             else select = true;
         }
     }
-    if (lostShown) Logf("TAKEOVER the shown screen was released by the game (bus switched off/on, reload)");
+    if (lostShown) {
+        Logf("TAKEOVER the shown screen was released by the game (Infotainment, bus switched off/on, reload)");
+    }
+    if (select || lostShown) g_shownPairTick = GetTickCount64();
     if (g_gpsLogged < 16 || select) {
         ++g_gpsLogged;
         LogDesc("TAKEOVER cab screen candidate", d, false);
@@ -442,6 +452,28 @@ UINT g_quadIbStart = ~0u;
 uint32_t g_quadMinIndex = 0;
 bool g_quadIbOk = false;
 bool g_posResolved = false;     // the current draw's display is known by its position
+bool g_isScreenDraw = false;    // the current draw shows the screen texture (set by ScreenDrawHidden)
+
+// Overlays: the game draws its own UI on top of the display (Volvo: search and zoom buttons, Scania: speed limit sign).
+// On the music and trip pages those draws are skipped: every quad batch drawn after the CarPlay display into the same
+// render target has its corners read back like the displays (kRing frames late); one that lies inside the display is
+// not drawn. The map page keeps them (they belong to the map).
+constexpr int kOverlays = 24, kOverlayQuads = 64;
+ID3D11Buffer* g_ovStage[kRing][kOverlays] = {};
+bool g_ovPending[kRing][kOverlays] = {};
+UINT g_ovVerts[kRing][kOverlays] = {};
+OrdPos g_ovPos[kOverlays];
+int g_overlayOrd = 0;
+bool g_carplayRectOk = false;           // the CarPlay display was drawn in this frame, at g_carplayRect
+OrdPos g_carplayRect;
+void* g_curRt = nullptr;                // render target bound now (resource pointer, no reference)
+void* g_carplayRt = nullptr;            // ... when the CarPlay display was drawn
+int g_overlaysHidden = 0;               // for the log
+bool g_carplayDrawn = false;            // a display showing CarPlay was drawn in this frame
+bool g_dashBound = false;               // the CarPlay display's render target was bound in this frame
+std::unordered_map<UINT, uint32_t> g_minIndex;  // first vertex index of the quad batch at each start (g_quadIb)
+ID3D11Buffer* g_minIndexIb = nullptr;
+bool g_overlayWhyLogged = false;
 bool g_fitResetDone = false;    // the fit was restarted once the displays could be told apart
 
 void CopyQuadCorners(ID3D11DeviceContext* ctx, int ord, UINT start, INT base, const QuadLayout& ql) {
@@ -525,12 +557,132 @@ void ReadQuadCorners(ID3D11DeviceContext* ctx, const QuadLayout& ql) {
                                  static_cast<int>(std::lround(x1 * sc)), static_cast<int>(std::lround(y1 * sc))};
         }
     }
+    for (int k = 0; k < kOverlays; ++k) {
+        if (!g_ovPending[slot][k] || !g_ovStage[slot][k]) continue;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        HRESULT hr = ctx->Map(g_ovStage[slot][k], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) continue;
+        g_ovPending[slot][k] = false;
+        if (FAILED(hr)) continue;
+        double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+        for (UINT i = 0; i < g_ovVerts[slot][k]; ++i) {
+            float xy[2];
+            memcpy(xy, static_cast<const uint8_t*>(m.pData) + static_cast<size_t>(i) * ql.stride + ql.posOffset, 8);
+            x0 = std::min(x0, static_cast<double>(xy[0]));
+            x1 = std::max(x1, static_cast<double>(xy[0]));
+            y0 = std::min(y0, static_cast<double>(xy[1]));
+            y1 = std::max(y1, static_cast<double>(xy[1]));
+        }
+        ctx->Unmap(g_ovStage[slot][k], 0);
+        const double sc = ql.ndc ? 1000.0 : 1.0;
+        g_ovPos[k] = OrdPos{std::isfinite(x0 + x1 + y0 + y1) && std::fabs(x0) < 1e5 && std::fabs(y1) < 1e5,
+                            static_cast<int>(std::lround(x0 * sc)), static_cast<int>(std::lround(y0 * sc)),
+                            static_cast<int>(std::lround(x1 * sc)), static_cast<int>(std::lround(y1 * sc))};
+    }
     g_posFrame = (g_posFrame + 1) % kRing;
+}
+
+// True if this draw is the game's own UI on top of the CarPlay display and should be skipped (music / trip page).
+bool OverlayHidden(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base) {
+    if (g_page.load(std::memory_order_relaxed) == kPageMap || !g_carplayRectOk || ctx != g_screenCtx) return false;
+    if (g_curRt != g_carplayRt) return false;  // another render target: not on the display
+    if (count == 0 || count % 6 != 0 || count > 6 * kOverlayQuads) return false;
+    const QuadLayout ql = FitQuadLayout();
+    if (!ql.ok) return false;
+    ID3D11Buffer* ib = nullptr;
+    DXGI_FORMAT ibFmt = DXGI_FORMAT_UNKNOWN;
+    UINT ibOff = 0;
+    ctx->IAGetIndexBuffer(&ib, &ibFmt, &ibOff);
+    if (!ib) return false;
+    // First vertex of this batch: read once per start index from the (static) quad index buffer, then cached.
+    if (ib != g_minIndexIb) {
+        g_minIndexIb = ib;
+        g_minIndex.clear();
+    }
+    uint32_t minIdx = 0;
+    auto mi = g_minIndex.find(start);
+    if (mi != g_minIndex.end()) {
+        minIdx = mi->second;
+    } else if (g_minIndex.size() < 256) {
+        const UINT isz = ibFmt == DXGI_FORMAT_R16_UINT ? 2 : ibFmt == DXGI_FORMAT_R32_UINT ? 4 : 0;
+        std::vector<uint8_t> bytes;
+        uint32_t mn = ~0u, mx = 0;
+        if (isz && FitReadBuffer(ctx, ib, ibOff + start * isz, count * isz, bytes)) {
+            for (UINT i = 0; i < count; ++i) {
+                uint32_t v = 0;
+                memcpy(&v, &bytes[static_cast<size_t>(i) * isz], isz);
+                mn = std::min(mn, v);
+                mx = std::max(mx, v);
+            }
+        }
+        // Only plain quad batches: count/6 quads use exactly count/6*4 consecutive vertices.
+        minIdx = (mn != ~0u && mx - mn + 1 == count / 6 * 4) ? mn : ~0u;
+        g_minIndex[start] = minIdx;
+    } else {
+        minIdx = ~0u;
+    }
+    ib->Release();
+    if (minIdx == ~0u) {
+        if (!g_overlayWhyLogged) {
+            g_overlayWhyLogged = true;
+            Logf("TAKEOVER overlay check: a draw after the display is not a plain quad batch (start %u, %u indices)", start,
+                 count);
+        }
+        return false;
+    }
+    const int k = g_overlayOrd++;
+    if (k >= kOverlays) return false;
+    ID3D11Buffer* vb = nullptr;
+    UINT stride = 0, offset = 0;
+    ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &offset);
+    if (!vb) return false;
+    if (stride != ql.stride && !g_overlayWhyLogged) {
+        g_overlayWhyLogged = true;
+        Logf("TAKEOVER overlay check: a draw after the display has another vertex format (stride %u, display %u)", stride,
+             ql.stride);
+    }
+    if (stride == ql.stride) {
+        ID3D11Buffer*& stage = g_ovStage[g_posFrame][k];
+        if (!stage) {
+            ID3D11Device* dev = nullptr;
+            ctx->GetDevice(&dev);
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = kOverlayQuads * 4 * 64;
+            bd.Usage = D3D11_USAGE_STAGING;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            if (dev) {
+                dev->CreateBuffer(&bd, nullptr, &stage);
+                dev->Release();
+            }
+        }
+        const UINT verts = count / 6 * 4;
+        D3D11_BUFFER_DESC vd{};
+        vb->GetDesc(&vd);
+        const int64_t first = static_cast<int64_t>(offset) + (static_cast<int64_t>(base) + minIdx) * stride;
+        if (stage && first >= 0 && first + static_cast<int64_t>(verts) * stride <= vd.ByteWidth) {
+            D3D11_BOX box{static_cast<UINT>(first), 0, 0, static_cast<UINT>(first) + verts * stride, 1, 1};
+            ctx->CopySubresourceRegion(stage, 0, 0, 0, 0, vb, 0, &box);
+            g_ovPending[g_posFrame][k] = true;
+            g_ovVerts[g_posFrame][k] = verts;
+        }
+    }
+    vb->Release();
+    const OrdPos& o = g_ovPos[k];
+    const int m = 2;
+    const bool inside = o.ok && o.x0 >= g_carplayRect.x0 - m && o.y0 >= g_carplayRect.y0 - m && o.x1 <= g_carplayRect.x1 + m &&
+                        o.y1 <= g_carplayRect.y1 + m && o.x1 > o.x0 && o.y1 > o.y0;
+    if (inside && g_overlaysHidden < 12) {
+        ++g_overlaysHidden;
+        Logf("TAKEOVER hiding the game's own UI on the display: draw %d after it at %d,%d..%d,%d", k, o.x0, o.y0, o.x1, o.y1);
+    }
+    return inside;
 }
 
 // True if this draw shows the screen on a display that keeps the game's picture.
 bool ScreenDrawHidden(ID3D11DeviceContext* ctx, UINT start, INT base) {
+    g_isScreenDraw = false;
     if (ctx != g_screenCtx || g_screenSlots.none()) return false;
+    g_isScreenDraw = true;
     if (g_drawsReset.exchange(false)) g_draws.clear();
     ScreenDraw d{};
     {
@@ -605,6 +757,14 @@ bool ScreenDrawHidden(ID3D11DeviceContext* ctx, UINT start, INT base) {
              IsHidden(d) ? "game picture, gps_takeover_hide" : "CarPlay");
     }
     const bool hidden = !g_hidden.empty() && IsHidden(d);
+    if (!hidden) g_carplayDrawn = true;
+    if (!hidden && ql.ok && d.px1 > d.px0) {  // the CarPlay display: overlays drawn after it inside this rectangle go
+        g_carplayRectOk = true;
+        g_carplayDrawn = true;
+        g_carplayRect = OrdPos{true, d.px0, d.py0, d.px1, d.py1};
+        g_carplayRt = g_curRt;
+        g_overlayOrd = 0;
+    }
     if (hidden && ql.ok && !g_fitResetDone) {  // the fit may have measured the other display before they were told apart
         g_fitResetDone = true;
         FitReset("the displays are told apart now: measure the one that shows CarPlay");
@@ -633,6 +793,16 @@ void SwapScreenSlots(ID3D11DeviceContext* ctx, bool restore) {
 void STDMETHODCALLTYPE HookOMSetRT(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* rtvs,
                                    ID3D11DepthStencilView* dsv) {
     ID3D11Texture2D* shown = g_gpsShown;
+    if (!g_off && ctx == g_screenCtx) {
+        g_curRt = nullptr;
+        if (n > 0 && rtvs && rtvs[0]) {
+            ID3D11Resource* r = nullptr;
+            rtvs[0]->GetResource(&r);
+            g_curRt = r;
+            if (r) r->Release();
+        }
+        if (g_curRt && g_curRt == g_carplayRt) g_dashBound = true;
+    }
     if (!g_off && shown && rtvs) {
         for (UINT i = 0; i < n && i < 8; ++i) {
             if (!rtvs[i]) continue;
@@ -647,6 +817,31 @@ void STDMETHODCALLTYPE HookOMSetRT(ID3D11DeviceContext* ctx, UINT n, ID3D11Rende
         }
     }
     g_omSetRt(ctx, n, rtvs, dsv);
+}
+
+// Infotainment button without the texture changing hands (Scania): the dashboard's render target is still in use but the
+// CarPlay display is not drawn (the game shows its blank page there). Looking away or opening the big map stops the
+// dashboard target as well, so that is not mistaken for a press. Blank -> CarPlay again = next page.
+void PageDetect() {
+    static int state = 0;  // 0 shown, 1 maybe blank, 2 blank
+    static ULONGLONG since = 0;
+    const ULONGLONG now = GetTickCount64();
+    const bool blankNow = g_dashBound && !g_carplayDrawn;
+    if (g_carplayDrawn) {
+        if (state == 2) OnScreenCameBack(since);  // not if the power went off while it was blank
+        if (state != 0) Logf("TAKEOVER page detect: CarPlay display back (was %s)", state == 2 ? "blank" : "briefly gone");
+        state = 0;
+    } else if (blankNow) {
+        if (state == 0) {
+            state = 1;
+            since = now;
+        } else if (state == 1 && now - since > 250) {
+            state = 2;
+            Logf("TAKEOVER page detect: dashboard drawn without the CarPlay display = the game's blank page");
+        }
+    } else if (state == 1) {
+        state = 0;  // nothing drawn at all: looked away / big map
+    }
 }
 
 void PageProbe() {
@@ -713,6 +908,112 @@ HRESULT STDMETHODCALLTYPE HookCreateTexture2D(ID3D11Device* dev, const D3D11_TEX
     return hr;
 }
 
+// ---- GPS takeover pages ----------------------------------------------------------------------------------------------
+std::vector<uint8_t> g_barPixels;  // map page: the now-playing bar, RGBA, rows of the bar rectangle (render thread)
+int g_bar[4] = {0, 0, 0, 0};       // x0 y0 x1 y1 in texture pixels, empty = no bar
+uint64_t g_frameNo = 0;            // counts Present calls
+uint64_t g_compositeFrame = ~0ull; // frame in which the map page was last composed
+std::vector<uint8_t> g_swizzle;    // BGRA -> RGBA conversion buffer
+
+// The renderer draws BGRA; in takeover mode our texture is RGBA (the game's format family).
+void ToRgba(const uint8_t* src, uint8_t* dst, size_t pixels) {
+    for (size_t i = 0; i < pixels; ++i) {
+        dst[4 * i + 0] = src[4 * i + 2];
+        dst[4 * i + 1] = src[4 * i + 1];
+        dst[4 * i + 2] = src[4 * i + 0];
+        dst[4 * i + 3] = src[4 * i + 3];
+    }
+}
+
+void UploadTakeoverFrame(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, const FrameView& frame) {
+    if (frame.page == kPageMap) {  // only the bar; the map itself is copied from the game's texture at draw time
+        static int logged = 0;
+        if (logged < 5) {
+            ++logged;
+            Logf("TAKEOVER map page frame: bar %d,%d..%d,%d", frame.barX0, frame.barY0, frame.barX1, frame.barY1);
+        }
+        g_bar[0] = frame.barX0;
+        g_bar[1] = frame.barY0;
+        g_bar[2] = frame.barX1;
+        g_bar[3] = frame.barY1;
+        const int w = g_bar[2] - g_bar[0], h = g_bar[3] - g_bar[1];
+        if (w <= 0 || h <= 0) {
+            g_barPixels.clear();
+            return;
+        }
+        g_barPixels.resize(static_cast<size_t>(w) * h * 4);
+        for (int y = 0; y < h; ++y) {
+            ToRgba(frame.data + static_cast<size_t>(g_bar[1] + y) * frame.pitch + static_cast<size_t>(g_bar[0]) * 4,
+                   &g_barPixels[static_cast<size_t>(y) * w * 4], static_cast<size_t>(w));
+        }
+        return;
+    }
+    g_barPixels.clear();
+    g_swizzle.resize(static_cast<size_t>(frame.width) * frame.height * 4);
+    for (uint32_t y = 0; y < frame.height; ++y) {
+        ToRgba(frame.data + static_cast<size_t>(y) * frame.pitch, &g_swizzle[static_cast<size_t>(y) * frame.width * 4],
+               frame.width);
+    }
+    ctx->UpdateSubresource(tex, 0, nullptr, g_swizzle.data(), frame.width * 4, 0);
+}
+
+// Map page: right before the display draws, our texture becomes the game's map of this frame plus the bar.
+void ComposeMapPage(ID3D11DeviceContext* ctx) {
+    if (g_compositeFrame == g_frameNo) return;
+    g_compositeFrame = g_frameNo;
+    ID3D11Texture2D *ours = nullptr, *game = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_screenMx);
+        ours = g_ourTex;
+        game = g_gpsShown;
+        if (ours) ours->AddRef();
+        if (game) game->AddRef();
+    }
+    if (ours && game) {
+        D3D11_TEXTURE2D_DESC a{}, b{};
+        ours->GetDesc(&a);
+        game->GetDesc(&b);
+        if (a.Width == b.Width && a.Height == b.Height) {
+            ctx->CopyResource(ours, game);
+            const int w = g_bar[2] - g_bar[0], h = g_bar[3] - g_bar[1];
+            static int logged = 0;
+            if (logged < 3 || (g_frameNo % 900) == 0) {  // a few times, then every ~15 s on the map page
+                ++logged;
+                Logf("TAKEOVER map page: game %ux%u fmt %u -> ours fmt %u, bar %d,%d..%d,%d (%zu bytes)", b.Width, b.Height,
+                     static_cast<unsigned>(b.Format), static_cast<unsigned>(a.Format), g_bar[0], g_bar[1], g_bar[2], g_bar[3],
+                     g_barPixels.size());
+            }
+            if (w > 0 && h > 0 && g_barPixels.size() == static_cast<size_t>(w) * h * 4) {
+                D3D11_BOX box{static_cast<UINT>(g_bar[0]), static_cast<UINT>(g_bar[1]), 0, static_cast<UINT>(g_bar[2]),
+                              static_cast<UINT>(g_bar[3]), 1};
+                ctx->UpdateSubresource(ours, 0, &box, g_barPixels.data(), static_cast<UINT>(w) * 4, 0);
+            }
+        } else {
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                Logf("TAKEOVER map page: our texture %ux%u differs from the game's %ux%u, no map", a.Width, a.Height,
+                     b.Width, b.Height);
+            }
+        }
+    }
+    if (ours) ours->Release();
+    if (game) game->Release();
+}
+
+// The Infotainment button blanked the screen (the game let go of its texture) and brought it back: next page.
+void OnScreenCameBack(ULONGLONG blankSince) {
+    const ULONGLONG off = EtaElectricOffTick();
+    if (off != 0 && off + 1000 >= blankSince) {  // switched off while (or just before) the screen was blank
+        Logf("TAKEOVER the screen came back after the power was off: page stays %d", g_page.load());
+        return;
+    }
+    const int next = (g_page.load() + 1) % kPageCount;
+    g_page = next;
+    static const char* names[kPageCount] = {"map", "music", "trip"};
+    Logf("TAKEOVER Infotainment: page %s", names[next]);
+}
+
 void UploadScreenFrame() {
     ID3D11Texture2D* tex = nullptr;
     {
@@ -751,7 +1052,12 @@ void UploadScreenFrame() {
         if (RendererLockFrame(g_screenUploaded, &frame)) {
             ID3D11DeviceContext* ctx = nullptr;
             dev->GetImmediateContext(&ctx);
-            if (ctx) {
+            if (ctx && GetSettings().gpsTakeover) {
+                UploadTakeoverFrame(ctx, tex, frame);
+                ctx->Release();
+                if (g_uploadCount == 0) Logf("SCREEN first frame uploaded (%ux%u)", frame.width, frame.height);
+                ++g_uploadCount;
+            } else if (ctx) {
                 ctx->UpdateSubresource(tex, 0, nullptr, frame.data, frame.pitch, 0);
                 ctx->Release();
                 if (g_uploadCount == 0) Logf("SCREEN first frame uploaded (%ux%u)", frame.width, frame.height);
@@ -1066,6 +1372,12 @@ void OnFrame(IDXGISwapChain* sc) {
         if (now && !f11) GpsCycleDisplays();
         f11 = now;
         PageProbe();
+        PageDetect();
+        g_carplayDrawn = false;
+        g_dashBound = false;
+        ++g_frameNo;
+        g_overlayOrd = 0;
+        g_carplayRectOk = false;
         g_frameDraws = 0;
         g_posResolved = true;  // draws outside the screen pass are not affected
         if (g_screenCtx) {
@@ -1107,6 +1419,13 @@ void STDMETHODCALLTYPE HookDrawIndexed(ID3D11DeviceContext* ctx, UINT count, UIN
         SwapScreenSlots(ctx, false);
         return;
     }
+    if (!g_off && g_takeover) {
+        if (g_isScreenDraw) {
+            if (g_page.load(std::memory_order_relaxed) == kPageMap) ComposeMapPage(ctx);
+        } else if (OverlayHidden(ctx, count, start, base)) {
+            return;  // the game's own UI on top of the music / trip page
+        }
+    }
     if (!g_off) {
         if (TouchHasBindings() && FitNeedsGeometry() && g_posResolved && TouchScreenBound(ctx)) {
             FitCaptureGeometry(ctx, count, start, base);
@@ -1123,6 +1442,13 @@ void STDMETHODCALLTYPE HookDrawIndexedInstanced(ID3D11DeviceContext* ctx, UINT c
         g_drawIndexedInstanced(ctx, count, instances, start, base, startInstance);
         SwapScreenSlots(ctx, false);
         return;
+    }
+    if (!g_off && g_takeover) {
+        if (g_isScreenDraw) {
+            if (g_page.load(std::memory_order_relaxed) == kPageMap) ComposeMapPage(ctx);
+        } else if (OverlayHidden(ctx, count, start, base)) {
+            return;
+        }
     }
     if (!g_off) {
         if (TouchHasBindings() && FitNeedsGeometry() && g_posResolved && TouchScreenBound(ctx)) {
@@ -1162,6 +1488,7 @@ bool D3D11HooksInstall(bool replaceTexture, bool uploadFrames, bool touch) {
     g_replaceTexture = replaceTexture;
     g_uploadFrames = uploadFrames;
     g_gpsSkip = std::max(0, GetSettings().gpsTakeoverPick);
+    g_takeover = GetSettings().gpsTakeover;
     LoadHidden();
     g_gpsOff = GetSettings().gpsTakeoverPick < 0;
     if (GetSettings().gpsTakeover) Logf("TAKEOVER on: CarPlay replaces the game's cab screen (start with candidate %d)", GetSettings().gpsTakeoverPick);
@@ -1267,4 +1594,8 @@ void D3D11HooksDisable() {
 
 namespace ep {
 bool TakeoverFlip() { return g_takeoverFlip.load(std::memory_order_relaxed); }
+}  // namespace ep
+
+namespace ep {
+int TakeoverPage() { return g_page.load(std::memory_order_relaxed); }
 }  // namespace ep

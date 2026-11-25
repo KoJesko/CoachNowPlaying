@@ -39,6 +39,19 @@ void EtaUpload();
 void EtaStop();
 // Telemetry truck.electric.enabled: switching on plays the start-up animation of the CarPlay screen.
 void EtaSetElectric(bool on);
+// For the CarPlay trip page (GPS takeover): the current navigation values.
+struct TripInfo {
+    bool haveTime = false;      // game time known
+    uint32_t gameMinutes = 0;
+    float navSeconds = 0;       // remaining travel time (in-game seconds), 0 = no route
+    float navMeters = 0;        // remaining distance, 0 = no route
+    float speedLimit = 0;       // m/s, 0 = none
+};
+TripInfo EtaGetTrip();
+// Arrival as a clock time ("22:52", suffix "+1" on a later day), or "--:--" without a route.
+void EtaArrivalText(std::wstring& main, std::wstring& suffix);
+// Last time the electrics were switched off (GetTickCount64), 0 = never.
+unsigned long long EtaElectricOffTick();
 // Telemetry config truck license.plate / license.plate.country.id: drawn on the rear luggage box placeholder.
 void EtaSetPlate(const std::string& plate, const std::string& countryId);
 
