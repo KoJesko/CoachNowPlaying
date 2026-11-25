@@ -17,5 +17,7 @@ bool TakeoverFlip();
 // comes back (not after switching the power off) the next page shows. Map = the game's map with the now-playing bar.
 constexpr int kPageMap = 0, kPageMusic = 1, kPageTrip = 2, kPageCount = 3;
 int TakeoverPage();
+// GPS takeover in use right now: [screen] gps_takeover=1, or auto until the mod's own CarPlay screen loads.
+bool TakeoverActive();
 
 }  // namespace ep

@@ -50,6 +50,9 @@ std::atomic<bool> g_off{false};
 // of our own BGRA texture instead. The renderer's frames are copied into that texture from Present.
 // ---------------------------------------------------------------------------------------------
 std::mutex g_screenMx;
+// GPS takeover in use ([screen] gps_takeover=1, or auto until the mod's screen loads). Read on the render thread, set at
+// start and cleared once by TakeoverStopForMod.
+std::atomic<bool> g_takeover{false};
 ID3D11Texture2D* g_placeholder = nullptr;  // the game's texture (we keep one reference to compare pointers safely)
 ID3D11Texture2D* g_ourTex = nullptr;       // our private BGRA texture
 ID3D11ShaderResourceView* g_ourSrv = nullptr;
@@ -151,7 +154,7 @@ void OnPlaceholderCreated(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& d, ID3D
     nd.ArraySize = 1;
     // GPS takeover: the same format family as the game's cab screen texture (RGBA8), so the map page can copy the game's
     // map into ours on the GPU. The renderer's BGRA frames are converted when they are uploaded.
-    nd.Format = GetSettings().gpsTakeover ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_B8G8R8A8_TYPELESS;
+    nd.Format = g_takeover ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_B8G8R8A8_TYPELESS;
     nd.SampleDesc.Count = 1;
     nd.Usage = D3D11_USAGE_DEFAULT;
     nd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -188,7 +191,7 @@ void OnPlaceholderViewCreated(ID3D11Device* dev, ID3D11ShaderResourceView* gameV
     bool srgb = desc && desc->Format != DXGI_FORMAT_UNKNOWN ? IsSrgbFormat(desc->Format) : g_placeholderSrgb;
 
     D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
-    if (GetSettings().gpsTakeover) vd.Format = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (g_takeover) vd.Format = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
     else vd.Format = srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM;
     vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     vd.Texture2D.MipLevels = 1;
@@ -221,7 +224,6 @@ struct GpsCand {
 unsigned g_gpsSeq = 0;
 std::vector<GpsCand> g_gps;            // under g_screenMx, in creation order
 std::atomic<bool> g_drawsReset{false};
-bool g_takeover = false;  // [screen] gps_takeover, cached for the draw hooks
 std::atomic<int> g_page{kPageMusic};  // GPS takeover page (see TakeoverPage)
 ULONGLONG g_shownPairTick = 0;        // when the screen texture now in use was made
 void OnScreenCameBack(ULONGLONG oldPairTick);
@@ -250,6 +252,7 @@ void GpsSelect(ID3D11Texture2D* tex, const char* why) {
         std::lock_guard<std::mutex> lock(g_screenMx);
         ClearSwapSrvs();
         g_gpsShown = nullptr;
+        g_takeoverFlip.store(false);
         g_drawsReset.store(true);
         count = g_gps.size();
         for (size_t i = 0; tex && i < g_gps.size(); ++i) {
@@ -355,6 +358,20 @@ void GpsCycle() {
         g_gpsOff = next == nullptr;
     }
     GpsSelect(next, "Ctrl+Shift+F10");
+}
+
+// gps_takeover=auto and the mod's own CarPlay screen just loaded (single player with the mod): give the game's cab
+// screen back and let the mod path work as without the takeover.
+void TakeoverStopForMod() {
+    if (!g_takeover.exchange(false)) return;
+    GpsSelect(nullptr, "gps_takeover=auto: the mod's CarPlay screen is loaded, the mod shows the picture");
+    {
+        std::lock_guard<std::mutex> lock(g_screenMx);
+        for (GpsCand& c : g_gps) c.tex->Release();
+        g_gps.clear();
+    }
+    FitDisable();
+    Logf("TAKEOVER off for this session (auto): the mod is loaded");
 }
 
 // ---- GPS takeover: which displays show the picture ------------------------------------------------------------------
@@ -681,6 +698,7 @@ bool OverlayHidden(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base) {
 // True if this draw shows the screen on a display that keeps the game's picture.
 bool ScreenDrawHidden(ID3D11DeviceContext* ctx, UINT start, INT base) {
     g_isScreenDraw = false;
+    if (!g_takeover.load(std::memory_order_relaxed)) return false;  // (auto mode after the mod loaded)
     if (ctx != g_screenCtx || g_screenSlots.none()) return false;
     g_isScreenDraw = true;
     if (g_drawsReset.exchange(false)) g_draws.clear();
@@ -902,9 +920,12 @@ HRESULT STDMETHODCALLTYPE HookCreateTexture2D(ID3D11Device* dev, const D3D11_TEX
         }
         return hr;
     }
-    if (g_replaceTexture && *out && IsPlaceholder(desc)) OnPlaceholderCreated(dev, *desc, *out, init != nullptr);
+    if (g_replaceTexture && *out && IsPlaceholder(desc)) {
+        if (g_takeover && GetSettings().gpsTakeoverAuto) TakeoverStopForMod();
+        OnPlaceholderCreated(dev, *desc, *out, init != nullptr);
+    }
     else if (g_replaceTexture && *out && EtaIsPlaceholder(desc)) EtaOnPlaceholderCreated(dev, *desc, *out, g_createTex2D);
-    else if (g_replaceTexture && *out && GetSettings().gpsTakeover && IsGpsRenderTarget(desc)) OnGpsTargetCreated(*desc, *out);
+    else if (g_replaceTexture && *out && g_takeover && IsGpsRenderTarget(desc)) OnGpsTargetCreated(*desc, *out);
     return hr;
 }
 
@@ -1052,7 +1073,7 @@ void UploadScreenFrame() {
         if (RendererLockFrame(g_screenUploaded, &frame)) {
             ID3D11DeviceContext* ctx = nullptr;
             dev->GetImmediateContext(&ctx);
-            if (ctx && GetSettings().gpsTakeover) {
+            if (ctx && g_takeover) {
                 UploadTakeoverFrame(ctx, tex, frame);
                 ctx->Release();
                 if (g_uploadCount == 0) Logf("SCREEN first frame uploaded (%ux%u)", frame.width, frame.height);
@@ -1249,7 +1270,7 @@ HRESULT STDMETHODCALLTYPE HookCreateSRV(ID3D11Device* dev, ID3D11Resource* res,
         // A new view may reuse the address of a released one: forget what we knew about it.
         RemoveSwapSrv(*out);
         EtaForgetView(*out);
-        if (GetSettings().gpsTakeover) GpsForgetView(*out);
+        if (g_takeover) GpsForgetView(*out);
         if (EtaIsPlaceholderResource(res)) EtaOnPlaceholderViewCreated(dev, res, *out, desc, g_createSrv);
         {
             std::lock_guard<std::mutex> lock(g_mx);
@@ -1261,7 +1282,7 @@ HRESULT STDMETHODCALLTYPE HookCreateSRV(ID3D11Device* dev, ID3D11Resource* res,
             isPlaceholder = res == g_placeholder;
         }
         if (isPlaceholder) OnPlaceholderViewCreated(dev, *out, desc);
-        else if (res && GetSettings().gpsTakeover) OnGpsViewCreated(dev, res, *out, desc);
+        else if (res && g_takeover) OnGpsViewCreated(dev, res, *out, desc);
     }
     return hr;
 }
@@ -1360,7 +1381,7 @@ void OnFrame(IDXGISwapChain* sc) {
     EtaUpload();
     TouchOnPresent(sc);
 
-    if (GetSettings().gpsTakeover) {  // Ctrl+Shift+F10: CarPlay on the next candidate screen / back to the stock GPS
+    if (g_takeover) {  // Ctrl+Shift+F10: CarPlay on the next candidate screen / back to the stock GPS
         static bool f10 = false;
         bool now = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
                    (GetAsyncKeyState(VK_F10) & 0x8000) && ForegroundIsUs();
@@ -1598,4 +1619,8 @@ bool TakeoverFlip() { return g_takeoverFlip.load(std::memory_order_relaxed); }
 
 namespace ep {
 int TakeoverPage() { return g_page.load(std::memory_order_relaxed); }
+}  // namespace ep
+
+namespace ep {
+bool TakeoverActive() { return g_takeover.load(std::memory_order_relaxed); }
 }  // namespace ep

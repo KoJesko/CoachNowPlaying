@@ -1006,6 +1006,14 @@ void FitInit(int mode) {
 
 bool FitEnabled() { return g_enabled; }
 
+void FitDisable() {
+    std::lock_guard<std::mutex> lock(g_mx);
+    if (!g_enabled) return;
+    g_enabled = false;
+    g_fit = ScreenFit{};
+    Logf("FIT off (the mod places the picture)");
+}
+
 void FitReset(const char* reason) {
     if (!g_enabled) return;
     std::lock_guard<std::mutex> lock(g_mx);

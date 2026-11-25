@@ -426,7 +426,7 @@ void Renderer::DrawMedia(const MediaSnapshot& m, double t) {
     for (auto& c : source) c = static_cast<wchar_t>(towupper(c));
     // GPS takeover: the game's cab screens are small and coarse (about 700 x 280 pixels on the Volvo 9700), so the text
     // is larger there; the lines still end above the progress bar.
-    const bool big = GetSettings().gpsTakeover;
+    const bool big = TakeoverActive();
     Text(source, 40, 24, 300, big ? 30 : 24, big ? 21 : 15, DWRITE_FONT_WEIGHT_SEMI_BOLD,
          Rgb(accent_.r, accent_.g, accent_.b, 0.95f));
 
@@ -832,7 +832,7 @@ void Renderer::Frame(double t) {
     drawTransform_ = D2D1::Matrix3x2F::Translation(0, fit.valid ? static_cast<float>(fit.designOffsetY) : 0.0f) * uiTransform_;
     rt_->SetTransform(drawTransform_);
     bool buttons = false;
-    page_ = GetSettings().gpsTakeover ? TakeoverPage() : kPageMusic;
+    page_ = TakeoverActive() ? TakeoverPage() : kPageMusic;
     bar_[0] = bar_[1] = bar_[2] = bar_[3] = 0;
 #ifndef _MSC_VER
     const MediaSnapshot pageMedia = page_ == kPageMap ? MediaGetSnapshot() : MediaSnapshot{};

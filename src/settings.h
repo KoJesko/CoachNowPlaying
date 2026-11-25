@@ -30,7 +30,10 @@ struct Settings {
     bool textureFinder = false;     // [debug] texture_finder: developer tool (Ctrl+Shift+F6..F9), not in the default ini
     // [screen] gps_takeover: 1 = without the mod (e.g. TruckersMP), show the CarPlay picture on the game's own cab
     // screen (its 1024x1024 render target). Ctrl+Shift+F10 cycles: candidate 0, 1, ..., off (stock GPS).
+    // auto = like 1, but it switches itself off as soon as the mod's own CarPlay screen loads (single player with the mod).
+    // gpsTakeover: prepared at start (1 or auto); whether it is still in use: TakeoverActive() (d3d11_hooks.h).
     bool gpsTakeover = false;
+    bool gpsTakeoverAuto = false;
     int gpsTakeoverPick = 0;        // [screen] gps_takeover_pick: which matching texture to use first (-1 = start off)
     // [screen] gps_takeover_hide: displays (meshes "indices:start:base", comma separated) that share the cab screen
     // texture but keep the game's own picture, e.g. the middle of a Volvo 9700's instrument cluster. Ctrl+Shift+F11.

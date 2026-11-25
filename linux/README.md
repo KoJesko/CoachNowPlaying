@@ -86,8 +86,21 @@ TruckersMP does not load Workshop mods, so the mod's placeholder textures never 
 screen into a 1024x1024 RGBA8 render target, found with upstream's texture finder (`[debug] texture_finder=1`).
 A coach has two textures that look like it, so **Ctrl+Shift+F10** moves the picture to the next one, and after the
 last one back to the stock GPS. The same key switches between CarPlay and the map while driving.
-`gps_takeover_pick` (default 0) is the one it starts with. Leave this off when the mod is loaded. Don't let
-PrismTextureStreamer take over the GPS screen at the same time either.
+`gps_takeover_pick` (default 0) is the one it starts with. Leave this off when the mod is loaded, or use
+`gps_takeover=auto`: on like `1`, but it switches itself off as soon as the mod's own CarPlay screen loads (single
+player with the mod), so one setting works for both. Don't let PrismTextureStreamer take over the GPS screen at the same
+time either.
+
+On the coaches tested (Volvo 9700, MAN Lion's Coach, Scania Touring) use `gps_takeover_pick=1`: the game keeps the cab
+screen texture in pairs, and the second one is what the displays show, so CarPlay can be limited to one display there.
+Where two displays show it (Volvo 9700: the centre screen and the middle of the instrument cluster),
+**Ctrl+Shift+F11** picks which one shows CarPlay; the other keeps the game's picture (saved as `gps_takeover_hide`).
+The picture is fitted to the display by itself.
+
+Pages, like the mod's: the game's **Infotainment** button blanks the screen, and every time it comes back the next
+page shows: **Map** (the game's map with the now-playing bar), **Music**, **Trip** (arrival time, distance and time
+left, next coach stop, speed limit). On Music and Trip the game's own buttons and signs on that screen are hidden. The
+blank page in between comes from the game and cannot be skipped without the mod.
 
 Credit: [PrismTextureStreamer](https://github.com/Baldywaldy09/PrismTextureStreamer) by Baldywaldy09 showed that a
 plain SDK plugin can take over a cab screen on TruckersMP. Its code was not used (it has no licence). This build

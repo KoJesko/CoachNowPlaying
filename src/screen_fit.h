@@ -60,6 +60,7 @@ struct ScreenOrientation {
 
 // mode: 0 = off, 1 = measure and apply, 2 = measure and write the result to the log only
 void FitInit(int mode);
+void FitDisable();  // gps_takeover=auto met the mod: the game places the picture again
 bool FitEnabled();
 void FitReset(const char* reason);  // a new screen texture appeared (new truck / reload)
 

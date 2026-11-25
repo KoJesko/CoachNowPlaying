@@ -96,7 +96,12 @@ void LoadSettings(const std::wstring& dir) {
     g_settings.extraSources = GetPrivateProfileIntW(L"radio", L"extra_sources", 1, ini.c_str()) != 0;
     g_settings.touch = GetPrivateProfileIntW(L"touch", L"enabled", 1, ini.c_str()) != 0;
     g_settings.textureFinder = GetPrivateProfileIntW(L"debug", L"texture_finder", 0, ini.c_str()) != 0;
-    g_settings.gpsTakeover = GetPrivateProfileIntW(L"screen", L"gps_takeover", 0, ini.c_str()) != 0;
+    {
+        wchar_t v[16] = {};
+        GetPrivateProfileStringW(L"screen", L"gps_takeover", L"0", v, 16, ini.c_str());
+        g_settings.gpsTakeoverAuto = _wcsicmp(v, L"auto") == 0;
+        g_settings.gpsTakeover = g_settings.gpsTakeoverAuto || _wtoi(v) != 0;
+    }
     g_settings.gpsTakeoverPick = static_cast<int>(GetPrivateProfileIntW(L"screen", L"gps_takeover_pick", 0, ini.c_str()));
     {
         wchar_t hide[512] = {};
