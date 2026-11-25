@@ -96,17 +96,17 @@ reuses CoachNowPlaying's own view swap. For Prism itself on Linux/Wayland, see
 
 ### English announcements
 
-This build picks the Piper voice by language: `voice/de_*.onnx` for German (Thorsten, in the upstream ZIP) and
-`voice/en_*.onnx` for English. No English voice ships with it. Download one into `CoachNowPlaying_piper/voice/`,
-both the `.onnx` and the `.onnx.json` file, for example "Ryan" (high quality, US English, CC BY-NC-SA 4.0, so not
-included here):
+Since 0.8.0 the plugin picks the Piper voice for each announcement language from `CoachNowPlaying_piper/voice/`
+(see upstream's README for the language list). For English, put an English voice there, both the `.onnx` and the
+`.onnx.json` file. One example is "Ryan" (high quality, US English, CC BY-NC-SA 4.0, so it isn't included here):
 
 - [en_US-ryan-high.onnx](https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/high/en_US-ryan-high.onnx)
 - [en_US-ryan-high.onnx.json](https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/high/en_US-ryan-high.onnx.json)
 
 Other voices: [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices/tree/v1.0.0/en). Then set
-`[announce] language=en` in the INI. Without an English Piper voice, `language=en` falls back to the Windows speech
-voice. Under Proton that needs the Steam tool "Proton Voice Files" (`steam://install/3086180`).
+`[announce] language=en` in the INI (or keep `auto` with the game in English). Coach stops along the line get
+"our next stop is …" in English and German. Other languages use the normal arrival text, which also names the stop.
+Without a Piper voice for the language, the Windows speech voice is used. Under Proton that needs the Steam tool "Proton Voice Files" (`steam://install/3086180`).
 
 For Local Radio, use the Linux port linked above (it tells the bridge which station plays). With **Plasma browser
 integration** (KDE) the bridge also sees the stream address and can use the station's own song titles; without it,

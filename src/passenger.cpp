@@ -26,7 +26,7 @@ namespace {
 
 std::mutex g_mx;
 std::wstring g_source, g_dest;
-std::wstring g_busStop;           // coach job: next stop (empty = no coach job)
+std::wstring g_busStop;           // coach job (bus_job config): next stop, empty = no coach job
 int g_busStage = -1;
 bool g_busFinal = false;
 float g_plannedKm = 0.0f;
@@ -132,17 +132,14 @@ std::wstring PluginDir() {
     return s == std::wstring::npos ? L"." : p.substr(0, s);
 }
 
-// Piper (neural text-to-speech, offline): <plugins>\CoachNowPlaying_piper\piper.exe + voice\<lang>_*.onnx
-// lang is the Piper voice prefix ("de", "en"): de_DE-thorsten-high.onnx, en_US-ryan-high.onnx, ...
-bool PiperSay(const std::wstring& text, const wchar_t* lang, std::vector<double>& out, int& rate) {
+
+// Piper (neural text-to-speech, offline): <plugins>\CoachNowPlaying_piper\piper.exe + voice\*.onnx
+bool PiperSay(const std::wstring& text, const AnnounceLang& lang, std::vector<double>& out, int& rate) {
     const std::wstring dir = PluginDir() + L"\\CoachNowPlaying_piper";
     const std::wstring exe = dir + L"\\piper.exe";
     if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
-    std::wstring model;
-    WIN32_FIND_DATAW fd;
-    HANDLE f = FindFirstFileW((dir + L"\\voice\\" + lang + L"_*.onnx").c_str(), &fd);
-    if (f != INVALID_HANDLE_VALUE) { model = dir + L"\\voice\\" + fd.cFileName; FindClose(f); }
-    if (model.empty()) { Logf("ANNOUNCE piper found but no %ls voice (%ls_*.onnx) in CoachNowPlaying_piper\\voice", lang, lang); return false; }
+    const std::wstring model = PiperVoiceFile(dir, lang);
+    if (model.empty()) { Logf("ANNOUNCE no Piper voice for '%ls' in CoachNowPlaying_piper\\voice", lang.Code().c_str()); return false; }
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
     const std::wstring wav = std::wstring(tmp) + L"CoachNowPlaying_announce.wav";
@@ -226,62 +223,93 @@ bool PickVoice(ISpVoice* voice, const wchar_t* lcid) {
     return ok;
 }
 
-// finalStop = false: a coach stop along the line (the trip goes on), true: the end of the trip.
-std::wstring AnnounceText(const std::wstring& dest, int hour, bool german, bool finalStop) {
-    if (!finalStop && !dest.empty()) {
-        if (german)
-            return L"Sehr geehrte Fahrgäste, unser nächster Halt ist " + dest +
-                   L". Wir erreichen ihn in wenigen Minuten. Bitte bleiben Sie bis zum Halt angeschnallt.";
-        return L"Ladies and gentlemen, our next stop is " + dest +
-               L". We will arrive in a few minutes. Please stay seated with your seatbelt fastened until we stop.";
-    }
-    if (german) {
-        const wchar_t* wish = hour >= 5 && hour < 18 ? L"einen angenehmen Tag" : hour < 22 && hour >= 18 ? L"einen angenehmen Abend" : L"eine gute Nacht";
-        return L"Sehr geehrte Fahrgäste, wir erreichen in wenigen Minuten " + (dest.empty() ? std::wstring(L"unser Ziel") : dest) +
-               L". Wir bedanken uns für Ihre Reise und wünschen Ihnen " + wish + L".";
+// Windows (SAPI) voice for the language, e.g. de_de -> "Language=407". true if one was found.
+bool PickWindowsVoice(ISpVoice* voice, const AnnounceLang& lang) {
+    std::wstring name = lang.region.empty() ? lang.base : lang.base + L"-" + lang.region;
+    if (lang.base == L"es" && lang.region == L"la") name = L"es-MX";
+    wchar_t full[LOCALE_NAME_MAX_LENGTH] = {};
+    if (ResolveLocaleName(name.c_str(), full, LOCALE_NAME_MAX_LENGTH) <= 0) return false;
+    for (const wchar_t* n : {name.c_str(), static_cast<const wchar_t*>(full)}) {
+        const LCID id = LocaleNameToLCID(n, 0);
+        if (!id || PRIMARYLANGID(LANGIDFROMLCID(id)) == LANG_NEUTRAL) continue;
+        wchar_t hex[16];
+        swprintf(hex, 16, L"%x", LANGIDFROMLCID(id));
+        if (PickVoice(voice, hex)) return true;
     }
     return false;
 }
 
+std::vector<uint8_t> WithDing(const std::vector<double>& voice, int rate, double gain, bool ding) {
+    std::vector<double> all;
+    if (ding) {
+        all = Ding(rate, 0.10);
+        all.resize(all.size() + rate / 10, 0.0);
+    }
+    std::vector<double> bus = BusSound(voice, rate);
+    all.insert(all.end(), bus.begin(), bus.end());
+    return MakeWav(all, rate, gain);
+}
+
+// A stop along a coach line (the trip goes on): "our next stop is ...". English and German have their own wording.
+// Other languages use the normal arrival text, which also names the stop.
+std::wstring StopText(const AnnounceLang& lang, const std::wstring& dest, int hour, bool finalStop) {
+    if (!finalStop && !dest.empty()) {
+        if (lang.base == L"de")
+            return L"Sehr geehrte Fahrgäste, unser nächster Halt ist " + dest +
+                   L". Wir erreichen ihn in wenigen Minuten. Bitte bleiben Sie bis zum Halt angeschnallt.";
+        if (lang.base == L"en")
+            return L"Ladies and gentlemen, our next stop is " + dest +
+                   L". We will arrive in a few minutes. Please stay seated with your seatbelt fastened until we stop.";
+    }
+    return AnnounceText(lang, dest, hour);
+}
+
+// One announcement per configured language (auto = the game's language), the chime before the first.
+// Per language: Piper voice of that language (coach sound) -> Windows voice of that language -> English.
+// finalStop = false: a stop along a coach line, true: the end of the trip (or a freight-style job).
 void Speak(std::wstring dest, int hour, bool finalStop) {
     const Settings& st = GetSettings();
     const double gain = std::clamp(st.announceVolume, 0, 100) / 100.0;
-    // 1) Piper (neural voice: German by default, English with language=en), with the coach sound
-    {
-        const bool german = st.announceLanguage != L"en";
-        std::vector<double> voice;
-        int rate = 22050;
-        const std::wstring text = AnnounceText(dest, hour, german, finalStop);
-        if (PiperSay(text, german ? L"de" : L"en", voice, rate)) {
-            std::vector<double> all = Ding(rate, 0.10);
-            all.resize(all.size() + rate / 10, 0.0);
-            std::vector<double> bus = BusSound(voice, rate);
-            all.insert(all.end(), bus.begin(), bus.end());
-            std::vector<uint8_t> wav = MakeWav(all, rate, gain);
-            Logf("ANNOUNCE (Piper): %ls", text.c_str());
-            PlaySoundW(reinterpret_cast<LPCWSTR>(wav.data()), nullptr, SND_MEMORY | SND_SYNC | SND_NODEFAULT);
-            g_speaking = false;
-            return;
+    bool first = true;
+    bool comTried = false, com = false;
+    for (AnnounceLang lang : AnnounceLanguages(st.announceLanguage)) {
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            const std::wstring text = StopText(lang, dest, hour, finalStop);
+            std::vector<double> voice;
+            int rate = 22050;
+            if (PiperSay(text, lang, voice, rate)) {
+                std::vector<uint8_t> wav = WithDing(voice, rate, gain, first);
+                Logf("ANNOUNCE (Piper %ls): %ls", lang.Code().c_str(), text.c_str());
+                PlaySoundW(reinterpret_cast<LPCWSTR>(wav.data()), nullptr, SND_MEMORY | SND_SYNC | SND_NODEFAULT);
+                first = false;
+                break;
+            }
+            if (!comTried) { comTried = true; com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)); }
+            ISpVoice* sp = nullptr;
+            bool spoke = false;
+            if (SUCCEEDED(CoCreateInstance(CLSID_SpVoice, nullptr, CLSCTX_ALL, IID_ISpVoice, reinterpret_cast<void**>(&sp)))) {
+                if (PickWindowsVoice(sp, lang)) {
+                    if (first) {
+                        std::vector<uint8_t> ding = MakeWav(Ding(22050, 0.10), 22050, gain);
+                        PlaySoundW(reinterpret_cast<LPCWSTR>(ding.data()), nullptr, SND_MEMORY | SND_SYNC | SND_NODEFAULT);
+                        first = false;
+                    }
+                    sp->SetVolume(static_cast<USHORT>(std::clamp(st.announceVolume, 0, 100)));
+                    sp->SetRate(-1);
+                    Logf("ANNOUNCE (Windows %ls voice): %ls", lang.Code().c_str(), text.c_str());
+                    sp->Speak(text.c_str(), SPF_DEFAULT, nullptr);
+                    spoke = true;
+                }
+                sp->Release();
+            }
+            if (spoke) break;
+            if (lang.base == L"en") { Logf("ANNOUNCE no voice for '%ls' and none for English", lang.Code().c_str()); break; }
+            Logf("ANNOUNCE no voice for '%ls' (Piper or Windows), English instead", lang.Code().c_str());
+            lang.base = L"en";
+            lang.region = L"gb";
         }
     }
-    // 2) Windows speech
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    std::vector<uint8_t> ding = MakeWav(Ding(22050, 0.10), 22050, gain);
-    PlaySoundW(reinterpret_cast<LPCWSTR>(ding.data()), nullptr, SND_MEMORY | SND_SYNC | SND_NODEFAULT);
-    ISpVoice* voice = nullptr;
-    if (SUCCEEDED(CoCreateInstance(CLSID_SpVoice, nullptr, CLSCTX_ALL, IID_ISpVoice, reinterpret_cast<void**>(&voice)))) {
-        const bool german = st.announceLanguage != L"en" && PickVoice(voice, L"407");
-        if (!german) PickVoice(voice, L"409");
-        const std::wstring text = AnnounceText(dest, hour, german, finalStop);
-        voice->SetVolume(static_cast<USHORT>(std::clamp(st.announceVolume, 0, 100)));
-        voice->SetRate(-1);
-        Logf("ANNOUNCE (Windows %s voice): %ls", german ? "German" : "English", text.c_str());
-        voice->Speak(text.c_str(), SPF_DEFAULT, nullptr);
-        voice->Release();
-    } else {
-        Logf("ANNOUNCE no Windows speech available");
-    }
-    CoUninitialize();
+    if (com) CoUninitialize();
     g_speaking = false;
 }
 }  // namespace
