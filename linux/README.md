@@ -1,4 +1,4 @@
-# CoachNowPlaying for Linux (ETS2 under Proton)
+# CoachNowPlaying for Linux (ETS2 / ATS under Proton)
 
 A Linux build of [CoachNowPlaying](https://github.com/videtess/CoachNowPlaying) by videtess, the plugin for the
 **"CarPlay-Style Infotainment for Coaches"** mod. Everything works like on Windows. The difference is the music page:
@@ -54,7 +54,7 @@ unchanged upstream code.
 
 ## Install
 
-Needs: ETS2 running under Proton, Python 3 with PyGObject (preinstalled on KDE/GNOME), and optionally `songrec` and
+Needs: ETS2 and/or ATS running under Proton, Python 3 with PyGObject (preinstalled on KDE/GNOME), and optionally `songrec` and
 PipeWire's `pw-record` for song recognition. For talk detection the installer creates a small Python environment with ONNX
 Runtime and downloads the YAMNet model (14 MB; skip with `NO_YAMNET=1`).
 
@@ -62,16 +62,18 @@ Runtime and downloads the YAMNet model (14 MB; skip with `NO_YAMNET=1`).
 sudo pacman -S songrec          # Debian/Ubuntu/Fedora: see SongRec's README, or the Flatpak re.fossplant.songrec
 git clone -b linux https://github.com/KoJesko/CoachNowPlaying.git
 cd CoachNowPlaying
-./linux/install.sh              # --game-dir "<path>/Euro Truck Simulator 2" if it's not in ~/.local/share/Steam
+./linux/install.sh              # finds ETS2 and ATS in every Steam library; or --game-dir "<path>" (repeatable)
 ```
 
 The installer:
 1. **Builds the DLL** if [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) is in `~/.local/opt/`. Otherwise, put
    `CoachNowPlaying.dll` from the Linux release into `linux/` first.
-2. **Copies it** into `bin/win_x64/plugins/`, backing up an existing Windows build.
+2. **Copies it** into `bin/win_x64/plugins/` of every ETS2 and ATS it finds (all Steam library folders), backing up
+   an existing build. Both games load the same DLL.
 3. **Starts the bridge** as a systemd user service at login.
 
-Copy the `CoachNowPlaying_piper` folder from the upstream release ZIP too if you want the voice announcements.
+Copy the `CoachNowPlaying_piper` folder from the upstream release ZIP into one game's `plugins/` too if you want the voice
+announcements; the installer copies it to the other game.
 
 ### Announcements on coach jobs
 
