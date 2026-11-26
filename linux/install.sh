@@ -75,9 +75,13 @@ if [[ "${NO_YAMNET:-0}" != 1 ]]; then
     PY="$DATA/venv/bin/python"
     if [[ ! -f "$DATA/model/yamnet-onnx-float/yamnet.onnx" ]]; then
       mkdir -p "$DATA/model"
+      # Pinned: the model is loaded by onnxruntime, so only unpack the exact release archive.
+      YAMNET_SHA256=cf08212c3b9c03160d3c343a5cf99dd53edcb3176b49b6dd330d7d0480abd309
       curl -fsSL -o "$DATA/model/y.zip" \
         https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models/models/yamnet/releases/v0.66.0/yamnet-onnx-float.zip \
-        && (cd "$DATA/model" && unzip -o -q y.zip && rm -f y.zip) || echo "    (model download failed - talk detection by name only)"
+        && echo "$YAMNET_SHA256  $DATA/model/y.zip" | sha256sum -c --status \
+        && (cd "$DATA/model" && unzip -o -q y.zip && rm -f y.zip) \
+        || { rm -f "$DATA/model/y.zip"; echo "    (model download failed or checksum mismatch - talk detection by name only)"; }
     fi
   else
     echo "    (pip install failed - talk detection by name and Shazam misses only)"
