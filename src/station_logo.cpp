@@ -176,7 +176,7 @@ void Process(const Job& job) {
         if (FindFaviconUrls(job, urls)) {
             for (const std::string& favicon : urls) {
                 std::vector<uint8_t> logo;
-                if (HttpGet(ToWide(favicon), logo, 6000, 2 * 1024 * 1024) && LooksLikeImage(logo)) {
+                if (HttpGet(ToWide(favicon), logo, 6000, 2 * 1024 * 1024, /*publicOnly=*/true) && LooksLikeImage(logo)) {
                     WriteFile(img, logo);
                     image = std::make_shared<std::vector<uint8_t>>(std::move(logo));
                     state = LogoState::Found;
