@@ -118,6 +118,19 @@ bool GetOnce(const std::wstring& url, std::vector<uint8_t>& body, int timeoutMs,
         !WinHttpReceiveResponse(request.h, nullptr)) {
         return false;
     }
+    if (publicOnly) {
+        // The host was vetted before connecting, but WinHTTP resolves it again itself, so a DNS answer that
+        // changes in between (rebinding) could still land on a LAN address. Check where the request actually
+        // went and drop the response if that isn't public. Behind a proxy this is the proxy's address.
+        WINHTTP_CONNECTION_INFO ci{};
+        ci.cbSize = sizeof(ci);
+        DWORD ciSize = sizeof(ci);
+        if (!WinHttpQueryOption(request.h, WINHTTP_OPTION_CONNECTION_INFO, &ci, &ciSize) ||
+            !IsPublicAddress(reinterpret_cast<const sockaddr*>(&ci.RemoteAddress))) {
+            Logf("HTTP dropped response from non-public peer: %ls", host);
+            return false;
+        }
+    }
     DWORD status = 0, size = sizeof(status);
     if (!WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
                              &status, &size, WINHTTP_NO_HEADER_INDEX)) {
